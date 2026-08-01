@@ -677,6 +677,9 @@ export default function Home() {
     Partial<Record<Companion["provider"], { spend: number; since: string }>>
   >({});
   const [providerSpendErrors, setProviderSpendErrors] = useState<DeviceKeys>({});
+  const [pushEnabled, setPushEnabled] = useState(false);
+  const [pushBusy, setPushBusy] = useState(false);
+  const [pushDeviceCount, setPushDeviceCount] = useState(0);
   const [providerFundDrafts, setProviderFundDrafts] = useState<
     Partial<Record<Companion["provider"], string>>
   >({});
@@ -1141,6 +1144,11 @@ export default function Home() {
       }
     });
   }, []);
+
+  useEffect(() => {
+    if (studioTab !== "connectors") return;
+    void refreshPushState();
+  }, [studioTab]);
 
   // Pull real charged spend whenever the Spending tab is open.
   useEffect(() => {
@@ -1862,6 +1870,127 @@ export default function Home() {
       return;
     }
     void attachFiles(event.dataTransfer.files);
+  }
+
+  // Push notifications (PDF Phase 10).
+  async function refreshPushState() {
+    if (!("serviceWorker" in navigator) || !("PushManager" in window)) return;
+    try {
+      const registration = await navigator.serviceWorker.ready;
+      const existing = await registration.pushManager.getSubscription();
+      setPushEnabled(Boolean(existing) && Notification.permission === "granted");
+      const response = await fetch("/api/push");
+      if (response.ok) {
+        const data = (await response.json()) as { deviceCount?: number };
+        setPushDeviceCount(Number(data.deviceCount) || 0);
+      }
+    } catch {
+      // Push is simply unavailable here; the toggle stays off.
+    }
+  }
+
+  async function togglePush() {
+    if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+      setNotice("This browser cannot deliver push notifications.");
+      return;
+    }
+    setPushBusy(true);
+    try {
+      const registration = await navigator.serviceWorker.ready;
+      const existing = await registration.pushManager.getSubscription();
+
+      if (pushEnabled && existing) {
+        await fetch(
+          `/api/push?endpoint=${encodeURIComponent(existing.endpoint)}`,
+          { method: "DELETE" },
+        );
+        await existing.unsubscribe();
+        setPushEnabled(false);
+        setNotice("Push notifications turned off on this device.");
+        await refreshPushState();
+        return;
+      }
+
+      const permission = await Notification.requestPermission();
+      if (permission !== "granted") {
+        setNotice(
+          permission === "denied"
+            ? "Notifications are blocked for this app in your browser settings."
+            : "Notification permission was not granted.",
+        );
+        return;
+      }
+
+      const keyResponse = await fetch("/api/push");
+      const keyData = (await keyResponse.json()) as {
+        publicKey?: string;
+        error?: string;
+      };
+      if (!keyResponse.ok || !keyData.publicKey) {
+        throw new Error(keyData.error || "The push key could not be loaded.");
+      }
+      const raw = atob(
+        keyData.publicKey.replace(/-/g, "+").replace(/_/g, "/"),
+      );
+      const applicationServerKey = new Uint8Array(raw.length);
+      for (let index = 0; index < raw.length; index += 1) {
+        applicationServerKey[index] = raw.charCodeAt(index);
+      }
+      const subscription =
+        existing ||
+        (await registration.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey,
+        }));
+      const saved = await fetch("/api/push", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          endpoint: subscription.endpoint,
+          keys: subscription.toJSON().keys,
+          label: navigator.userAgent.slice(0, 100),
+        }),
+      });
+      if (!saved.ok) {
+        const data = (await saved.json()) as { error?: string };
+        throw new Error(data.error || "This device could not be registered.");
+      }
+      setPushEnabled(true);
+      setNotice("Push notifications are on for this device.");
+      await refreshPushState();
+    } catch (error) {
+      setNotice(
+        error instanceof Error ? error.message : "Push notifications failed to start.",
+      );
+    } finally {
+      setPushBusy(false);
+    }
+  }
+
+  async function sendTestPush() {
+    setPushBusy(true);
+    try {
+      const response = await fetch("/api/push", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ test: true }),
+      });
+      const data = (await response.json()) as {
+        sent?: number;
+        failed?: number;
+        error?: string;
+      };
+      if (!response.ok) throw new Error(data.error || "The test could not be sent.");
+      setNotice(
+        data.sent
+          ? `Test notification sent to ${data.sent} device${data.sent === 1 ? "" : "s"}.`
+          : "No devices are registered for notifications yet.",
+      );
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "The test could not be sent.");
+    } finally {
+      setPushBusy(false);
+    }
   }
 
   async function copyMessage(message: Message) {
@@ -5976,6 +6105,47 @@ export default function Home() {
                       <span>Let companions search when the conversation requires current information</span>
                     </label>
                     <small>Search use is capped per reply. Sources are appended as clickable links when the provider returns citation metadata.</small>
+                  </section>
+                  <section className="continuity-card notion-card">
+                    <div className="continuity-card-heading">
+                      <div>
+                        <strong>Push notifications</strong>
+                        <p>Let Companion Lab reach this phone when the app is closed — a finished reply, or a companion checking in.</p>
+                      </div>
+                      <span className="memory-state" data-connected={pushEnabled || undefined}>
+                        {pushEnabled ? "On" : "Off"}
+                      </span>
+                    </div>
+                    <label className="connector-toggle">
+                      <input
+                        type="checkbox"
+                        checked={pushEnabled}
+                        disabled={pushBusy}
+                        onChange={() => void togglePush()}
+                      />
+                      <span>
+                        {pushEnabled
+                          ? "Notifications are on for this device"
+                          : "Turn on notifications for this device"}
+                      </span>
+                    </label>
+                    {pushEnabled && (
+                      <button
+                        type="button"
+                        className="sync-button"
+                        onClick={() => void sendTestPush()}
+                        disabled={pushBusy}
+                      >
+                        {pushBusy ? "Sending…" : "Send a test notification"}
+                      </button>
+                    )}
+                    <small>
+                      {pushDeviceCount
+                        ? `${pushDeviceCount} device${pushDeviceCount === 1 ? "" : "s"} registered. `
+                        : ""}
+                      Install Companion Lab to your home screen first — iPhone only delivers
+                      notifications to installed apps.
+                    </small>
                   </section>
                   <section className="continuity-card notion-card">
                     <div className="continuity-card-heading">
