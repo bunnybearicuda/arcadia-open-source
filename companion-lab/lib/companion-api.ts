@@ -63,6 +63,7 @@ export interface CompanionApiEnv {
   SUPABASE_URL?: string;
   SUPABASE_SERVICE_ROLE_KEY?: string;
   OPENROUTER_MANAGEMENT_KEY?: string;
+  CHECK_IN_SECRET?: string;
 }
 
 function text(value: unknown, fallback = "") {

@@ -15,6 +15,7 @@ import { handleProviderCreditApi } from "../lib/provider-credit-api";
 import { handleSupabaseMemoryApi } from "../lib/supabase-memory";
 import { handleMemoryDedupeApi } from "../lib/memory-dedupe";
 import { handlePushApi } from "../lib/push-api";
+import { handleCheckInApi } from "../lib/check-in-api";
 
 interface Env {
   ASSETS: Fetcher;
@@ -26,6 +27,7 @@ interface Env {
   OPENROUTER_MANAGEMENT_KEY?: string;
   SUPABASE_URL?: string;
   SUPABASE_SERVICE_ROLE_KEY?: string;
+  CHECK_IN_SECRET?: string;
   IMAGES: {
     input(stream: ReadableStream): {
       transform(options: Record<string, unknown>): {
@@ -72,6 +74,10 @@ const worker = {
 
     if (url.pathname === "/api/push") {
       return handlePushApi(request, env);
+    }
+
+    if (url.pathname === "/api/check-ins") {
+      return handleCheckInApi(request, env);
     }
 
     if (url.pathname === "/api/memory") {
