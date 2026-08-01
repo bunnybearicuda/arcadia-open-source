@@ -5210,3 +5210,13 @@ svg {
   background: rgba(67, 214, 162, 0.14);
   color: var(--green-bright);
 }
+
+.memory-fragment-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}

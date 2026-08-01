@@ -626,6 +626,7 @@ export default function Home() {
   const [importingMemory, setImportingMemory] = useState(false);
   const [memoryImportProgress, setMemoryImportProgress] = useState("");
   const [memoryShelf, setMemoryShelf] = useState<"shared" | "companion">("shared");
+  const [memoryFragmentReview, setMemoryFragmentReview] = useState(false);
   const [memoryCompanionId, setMemoryCompanionId] = useState(defaultCompanion.id);
   const [memoryImports, setMemoryImports] = useState<MemoryImport[]>([]);
   const [duplicateProposals, setDuplicateProposals] = useState<DuplicateProposal[]>([]);
@@ -2657,7 +2658,7 @@ export default function Home() {
     setLoadingMemory(true);
     try {
       const response = await fetch(
-        `/api/memory?q=${encodeURIComponent(query.trim())}&companionId=${encodeURIComponent(companionId)}&shelf=${shelf}&category=${encodeURIComponent(memoryCategory)}&source=${encodeURIComponent(memorySource)}&offset=${append ? memoryResults.length : 0}&limit=100`,
+        `/api/memory?q=${encodeURIComponent(query.trim())}&companionId=${encodeURIComponent(companionId)}&shelf=${shelf}&category=${encodeURIComponent(memoryCategory)}&source=${encodeURIComponent(memorySource)}${memoryFragmentReview ? "&view=short" : ""}&offset=${append ? memoryResults.length : 0}&limit=100`,
         { headers: supabaseHeaders() },
       );
       const data = (await response.json()) as {
@@ -6944,6 +6945,17 @@ export default function Home() {
                         </select>
                       </label>
                       <button type="button" onClick={() => void searchMemories()} disabled={loadingMemory}>Apply filters</button>
+                      <label className="memory-fragment-toggle">
+                        <input
+                          type="checkbox"
+                          checked={memoryFragmentReview}
+                          onChange={(event) => {
+                            setMemoryFragmentReview(event.target.checked);
+                            window.setTimeout(() => void searchMemories(), 0);
+                          }}
+                        />
+                        <span>Only short fragments — shortest first, for clearing junk</span>
+                      </label>
                     </div>
                     <div className="memory-selection-bar">
                       <label>

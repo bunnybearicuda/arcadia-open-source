@@ -276,6 +276,9 @@ export async function handleMemoryApi(
         .trim()
         .slice(0, 100);
       const shelf = url.searchParams.get("shelf") === "shared" ? "shared" : "companion";
+      // Fragment review: surfaces memories too short to carry their own
+      // context, shortest first, so they can be read and cleared in a pass.
+      const shortReview = url.searchParams.get("view") === "short";
       const ownerId = shelf === "shared" ? "shared" : companionId;
       const profile = await env.DB
         .prepare(
@@ -313,7 +316,12 @@ export async function handleMemoryApi(
           (category === "all" || memory.category === category) &&
           sourceMatches(memory.source),
       );
-      const matched = query ? filterAndRankMemoryBrowser(filtered, query) : filtered;
+      const ranked = query ? filterAndRankMemoryBrowser(filtered, query) : filtered;
+      const matched = shortReview
+        ? ranked
+            .filter((memory) => memory.content.trim().length <= 60)
+            .sort((left, right) => left.content.trim().length - right.content.trim().length)
+        : ranked;
       const visible = matched.slice(offset, offset + limit);
       const count = await env.DB
         .prepare(
