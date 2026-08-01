@@ -106,6 +106,13 @@ export function providerToolTracker(
       }
       return result;
     },
+    // Every accumulated call, for callers that route tools other than
+    // call_companion (connectors).
+    allCalls() {
+      return [...calls.values()]
+        .filter((call) => call.name)
+        .map((call) => ({ name: call.name, arguments: call.arguments }));
+    },
   };
 }
 

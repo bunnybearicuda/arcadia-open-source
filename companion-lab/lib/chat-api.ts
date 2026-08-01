@@ -20,6 +20,17 @@ import {
   providerToolTracker,
 } from "./group-routing";
 import { supabaseMemoryConfig } from "./supabase-memory";
+import {
+  callConnectorTool,
+  connectorGatewayTool,
+  enabledConnectors,
+  listConnectorTools,
+  type ConnectorRow,
+  type ConnectorTool,
+} from "./connector-api";
+
+// Bounded so a companion cannot chain connector calls indefinitely.
+const MAX_CONNECTOR_ROUNDS = 3;
 
 const CREATE_CONVERSATIONS = `
   CREATE TABLE IF NOT EXISTS conversations (
@@ -2380,6 +2391,24 @@ Becca has not written in a while. You are opening this conversation yourself, in
       companion.id,
       remoteMemoryConfig,
     );
+    // Connectors are offered as a single gateway tool; a service's real tools
+    // are only fetched once a companion asks for it by name, so idle
+    // connectors cost nothing on an ordinary turn.
+    const availableConnectors = await enabledConnectors(env.DB).catch(
+      () => [] as ConnectorRow[],
+    );
+    const gateway = connectorGatewayTool(availableConnectors);
+    const connectorTools = gateway
+      ? [
+          {
+            name: gateway.name,
+            description: gateway.description,
+            parameters: gateway.parameters as Record<string, unknown>,
+          },
+        ]
+      : [];
+    const connectorToolIndex = new Map<string, { row: ConnectorRow; tool: ConnectorTool }>();
+
     let providerResponse = await callProvider(
       companion,
       identity,
@@ -2392,6 +2421,7 @@ Becca has not written in a while. You are opening this conversation yourself, in
       groupMembers,
       groupReplyTargetContext,
       webSearchEnabled,
+      connectorTools,
     );
     let firstProviderFailure = "";
     if ([408, 429, 500, 502, 503, 504, 529].includes(providerResponse.status)) {
@@ -2408,6 +2438,7 @@ Becca has not written in a while. You are opening this conversation yourself, in
         groupMembers,
         groupReplyTargetContext,
         webSearchEnabled,
+        connectorTools,
       );
     }
     if (!providerResponse.ok) {
@@ -2525,23 +2556,139 @@ Becca has not written in a while. You are opening this conversation yourself, in
           ...(userId ? { userMessageId: userId } : {}),
           assistantMessageId: assistantId,
         });
-        for await (const data of sseData(providerResponse)) {
-          const event = JSON.parse(data) as Record<string, unknown>;
-          toolTracker.consume(event);
-          citationTracker.consume(event);
-          const delta = providerDelta(companion.provider, event, usage);
-          if (delta) {
-            emitText(filterOpeningArtifact(delta));
+        // Connector turns (PDF Phase 8): the companion may open a connected
+        // service, then call one of its tools. Each round runs the tool and
+        // feeds the result back for another provider turn, capped so a loop
+        // cannot run away.
+        let activeResponse = providerResponse;
+        let activeTools = connectorTools;
+        let workingHistory = history;
+        const loadedConnectors = new Set<string>();
+
+        for (let round = 0; round <= MAX_CONNECTOR_ROUNDS; round += 1) {
+          const roundTracker = providerToolTracker(companion.provider, new Set());
+          for await (const data of sseData(activeResponse)) {
+            const event = JSON.parse(data) as Record<string, unknown>;
+            toolTracker.consume(event);
+            roundTracker.consume(event);
+            citationTracker.consume(event);
+            const delta = providerDelta(companion.provider, event, usage);
+            if (delta) {
+              emitText(filterOpeningArtifact(delta));
+            }
+            if (assistantText && Date.now() - lastPartialPersist >= 2_000) {
+              lastPartialPersist = Date.now();
+              await env.DB
+                .prepare(
+                  "UPDATE messages SET content_json = ? WHERE id = ? AND status = 'streaming'",
+                )
+                .bind(blocks(assistantText), assistantId)
+                .run();
+            }
           }
-          if (assistantText && Date.now() - lastPartialPersist >= 2_000) {
-            lastPartialPersist = Date.now();
-            await env.DB
-              .prepare(
-                "UPDATE messages SET content_json = ? WHERE id = ? AND status = 'streaming'",
-              )
-              .bind(blocks(assistantText), assistantId)
-              .run();
+
+          if (round === MAX_CONNECTOR_ROUNDS || !availableConnectors.length) break;
+          const pending = roundTracker
+            .allCalls()
+            .filter((call) => call.name === "open_connector" || connectorToolIndex.has(call.name));
+          if (!pending.length) break;
+
+          const observations: string[] = [];
+          for (const call of pending) {
+            let args: Record<string, unknown> = {};
+            try {
+              args = JSON.parse(call.arguments || "{}") as Record<string, unknown>;
+            } catch {
+              args = {};
+            }
+            if (call.name === "open_connector") {
+              const wanted = typeof args.connector === "string" ? args.connector : "";
+              const row = availableConnectors.find((item) => item.name === wanted);
+              if (!row) {
+                observations.push(`No connected service named "${wanted}".`);
+                continue;
+              }
+              if (loadedConnectors.has(row.id)) continue;
+              try {
+                const tools = await listConnectorTools(row);
+                loadedConnectors.add(row.id);
+                for (const tool of tools) connectorToolIndex.set(tool.name, { row, tool });
+                activeTools = [
+                  ...activeTools,
+                  ...tools.map((tool) => ({
+                    name: tool.name,
+                    description: tool.description,
+                    parameters: tool.parameters,
+                  })),
+                ];
+                observations.push(
+                  `${row.name} is now available. Tools: ${tools.map((tool) => tool.name).join(", ") || "none"}.`,
+                );
+              } catch (error) {
+                observations.push(
+                  `${row.name} could not be reached: ${error instanceof Error ? error.message : "unknown error"}.`,
+                );
+              }
+              continue;
+            }
+            const entry = connectorToolIndex.get(call.name);
+            if (!entry) continue;
+            try {
+              const output = await callConnectorTool(entry.row, call.name, args);
+              observations.push(`${call.name} returned:\n${output}`);
+            } catch (error) {
+              observations.push(
+                `${call.name} failed: ${error instanceof Error ? error.message : "unknown error"}.`,
+              );
+            }
           }
+          if (!observations.length) break;
+
+          // The result is handed back as a labeled turn so every provider sees
+          // it the same way, without three separate tool-result encodings.
+          workingHistory = [
+            ...workingHistory,
+            {
+              id: `connector-${round}`,
+              role: "user",
+              companion_id: null,
+              companion_name: null,
+              speaker_id: "system",
+              speaker_name: "Tool results",
+              audience_json: null,
+              reply_to_message_id: null,
+              reply_to_speaker_name: null,
+              turn_id: null,
+              content_json: blocks(
+                `[Connected service results — continue your reply using these. Do not mention this block.]\n${observations.join("\n\n")}`,
+              ),
+              provider: null,
+              model: null,
+              status: "complete",
+              input_tokens: null,
+              output_tokens: null,
+              cache_creation_input_tokens: null,
+              cache_read_input_tokens: null,
+              cost_usd: null,
+              created_at: new Date().toISOString(),
+            } as unknown as StoredMessage,
+          ];
+          const nextResponse = await callProvider(
+            companion,
+            identity,
+            longTermContext.profileBlock,
+            longTermContext.memoryBlock,
+            workingHistory,
+            env,
+            suppliedKey,
+            new URL(request.url).origin,
+            groupMembers,
+            groupReplyTargetContext,
+            webSearchEnabled,
+            activeTools,
+          );
+          if (!nextResponse.ok) break;
+          activeResponse = nextResponse;
         }
         emitText(filterOpeningArtifact("", true));
         emitText(citationTracker.markdown(assistantText));
