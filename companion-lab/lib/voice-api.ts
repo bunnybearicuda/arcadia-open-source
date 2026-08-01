@@ -148,8 +148,10 @@ export async function handleVoiceApi(request: Request): Promise<Response> {
     requestBody.voice_settings = voiceSettings;
   }
 
+  // The streaming endpoint returns audio as it is generated instead of after
+  // the whole clip is rendered, so playback starts far sooner on long replies.
   const response = await fetch(
-    `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}?output_format=mp3_44100_128`,
+    `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}/stream?output_format=mp3_44100_128`,
     {
       method: "POST",
       headers: {
@@ -169,8 +171,7 @@ export async function handleVoiceApi(request: Request): Promise<Response> {
       502,
     );
   }
-  const audio = await response.arrayBuffer();
-  if (audio.byteLength < 512) {
+  if (!response.body) {
     return json(
       { error: "ElevenLabs returned an incomplete audio clip. Try the voice again." },
       502,
@@ -178,10 +179,11 @@ export async function handleVoiceApi(request: Request): Promise<Response> {
   }
   const headers = new Headers({
     "cache-control": "no-store",
-    "content-length": String(audio.byteLength),
     "content-type": contentType,
   });
   const characterCost = response.headers.get("character-cost");
   if (characterCost) headers.set("x-character-cost", characterCost);
-  return new Response(audio, { status: 200, headers });
+  // Piped straight through: generation, transfer, and buffering overlap
+  // instead of running end to end.
+  return new Response(response.body, { status: 200, headers });
 }

@@ -551,6 +551,7 @@ export default function Home() {
   const liveStreamIdsRef = useRef<Set<string>>(new Set());
   const activeConversationIdRef = useRef("");
   const speechRecognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const dictationStoppingRef = useRef(false);
   const activeAudioRef = useRef<HTMLAudioElement | null>(null);
   const voiceRequestRef = useRef<AbortController | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -1115,6 +1116,7 @@ export default function Home() {
 
   useEffect(() => {
     return () => {
+      dictationStoppingRef.current = true;
       speechRecognitionRef.current?.stop();
       activeAudioRef.current?.pause();
       voiceRequestRef.current?.abort();
@@ -1873,6 +1875,7 @@ export default function Home() {
 
   function toggleDictation() {
     if (listening) {
+      dictationStoppingRef.current = true;
       speechRecognitionRef.current?.stop();
       return;
     }
@@ -1886,39 +1889,73 @@ export default function Home() {
       setNotice("Talk-to-text is unavailable in this browser. Chrome on Android supports it.");
       return;
     }
-    const recognition = new Constructor();
     const startingDraft = draft.trimEnd();
-    const finalSegments = new Map<number, string>();
-    recognition.continuous = true;
-    recognition.interimResults = false;
-    recognition.lang = "en-US";
-    recognition.onresult = (event) => {
-      for (let index = event.resultIndex; index < event.results.length; index += 1) {
-        const result = event.results[index];
-        if (result.isFinal) {
+    // Browsers end a recognition session on every natural pause, which used to
+    // end dictation mid-thought. Text finalized in earlier sessions is kept
+    // here and the session restarts until dictation is stopped deliberately.
+    let committed = "";
+    let emptyRestarts = 0;
+    dictationStoppingRef.current = false;
+
+    const joinDraft = (...parts: string[]) =>
+      [startingDraft, committed, ...parts].filter(Boolean).join(" ").trimStart();
+
+    const startSession = () => {
+      const recognition = new Constructor();
+      const finalSegments = new Map<number, string>();
+      const startedAt = Date.now();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = "en-US";
+
+      const sessionText = () =>
+        Array.from(finalSegments.entries())
+          .sort(([left], [right]) => left - right)
+          .map(([, segment]) => segment)
+          .join(" ");
+
+      recognition.onresult = (event) => {
+        let interim = "";
+        for (let index = event.resultIndex; index < event.results.length; index += 1) {
+          const result = event.results[index];
           const segment = result[0]?.transcript?.trim();
-          if (segment) finalSegments.set(index, segment);
+          if (!segment) continue;
+          if (result.isFinal) finalSegments.set(index, segment);
+          else interim = segment;
         }
-      }
-      const transcript = Array.from(finalSegments.entries())
-        .sort(([left], [right]) => left - right)
-        .map(([, segment]) => segment)
-        .join(" ");
-      setDraft([startingDraft, transcript].filter(Boolean).join(" ").trimStart());
-    };
-    recognition.onerror = (event) => {
-      if (event.error && event.error !== "aborted") {
+        setDraft(joinDraft(sessionText(), interim));
+      };
+
+      recognition.onerror = (event) => {
+        // A silent stretch is normal mid-sentence; keep listening through it.
+        if (event.error === "no-speech" || event.error === "aborted") return;
+        dictationStoppingRef.current = true;
         setNotice(`Talk-to-text stopped: ${event.error}.`);
-      }
+      };
+
+      recognition.onend = () => {
+        const captured = sessionText();
+        committed = [committed, captured].filter(Boolean).join(" ");
+        emptyRestarts =
+          captured || Date.now() - startedAt > 900 ? 0 : emptyRestarts + 1;
+        // Restart unless it was stopped on purpose or the microphone is
+        // failing to open at all (guards against a restart loop).
+        if (!dictationStoppingRef.current && emptyRestarts < 4) {
+          startSession();
+          return;
+        }
+        speechRecognitionRef.current = null;
+        setDraft(joinDraft());
+        setListening(false);
+        requestAnimationFrame(() => composerTextareaRef.current?.focus());
+      };
+
+      speechRecognitionRef.current = recognition;
+      recognition.start();
     };
-    recognition.onend = () => {
-      speechRecognitionRef.current = null;
-      setListening(false);
-      requestAnimationFrame(() => composerTextareaRef.current?.focus());
-    };
-    speechRecognitionRef.current = recognition;
+
     setListening(true);
-    recognition.start();
+    startSession();
   }
 
   async function installApp() {
