@@ -1221,33 +1221,27 @@ async function callProvider(
         },
         ...messages,
       ],
-      ...(hasPdf
+      // OpenRouter web search is a plugin, not a tool type: the previous
+      // "openrouter:web_search" tools entry does not exist in OpenRouter's
+      // API and broke requests whenever search was toggled on.
+      ...(hasPdf || webSearchEnabled
         ? {
             plugins: [
-              {
-                id: "file-parser",
-                pdf: { engine: "cloudflare-ai" },
-              },
-            ],
-          }
-        : {}),
-      ...(callTool || webSearchEnabled
-        ? {
-            tools: [
-              ...(webSearchEnabled
+              ...(webSearchEnabled ? [{ id: "web", max_results: 5 }] : []),
+              ...(hasPdf
                 ? [
                     {
-                      type: "openrouter:web_search",
-                      parameters: {
-                        max_results: 5,
-                        max_total_results: 12,
-                        max_uses: 3,
-                        search_context_size: "low",
-                      },
+                      id: "file-parser",
+                      pdf: { engine: "cloudflare-ai" },
                     },
                   ]
                 : []),
-              ...(callTool ? [
+            ],
+          }
+        : {}),
+      ...(callTool
+        ? {
+            tools: [
               {
                 type: "function",
                 function: {
@@ -1256,10 +1250,8 @@ async function callProvider(
                   parameters: callTool.parameters,
                 },
               },
-              ] : []),
             ],
             tool_choice: "auto",
-            ...(webSearchEnabled ? { max_tool_calls: 5 } : {}),
           }
         : {}),
       stream: true,
