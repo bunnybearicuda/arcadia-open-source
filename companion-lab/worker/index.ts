@@ -16,6 +16,7 @@ import { handleSupabaseMemoryApi } from "../lib/supabase-memory";
 import { handleMemoryDedupeApi } from "../lib/memory-dedupe";
 import { handlePushApi } from "../lib/push-api";
 import { handleCheckInApi } from "../lib/check-in-api";
+import { handleConnectorApi } from "../lib/connector-api";
 
 interface Env {
   ASSETS: Fetcher;
@@ -78,6 +79,10 @@ const worker = {
 
     if (url.pathname === "/api/check-ins") {
       return handleCheckInApi(request, env);
+    }
+
+    if (url.pathname === "/api/connectors") {
+      return handleConnectorApi(request, env);
     }
 
     if (url.pathname === "/api/memory") {
