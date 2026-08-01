@@ -558,6 +558,7 @@ export default function Home() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [folders, setFolders] = useState<ChatFolder[]>([]);
   const [menuConversationId, setMenuConversationId] = useState<string | null>(null);
+  const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [movePickerConversationId, setMovePickerConversationId] = useState<string | null>(null);
   const [newFolderDraft, setNewFolderDraft] = useState("");
   const [activeConversationId, setActiveConversationId] = useState("kian-main");
@@ -1696,6 +1697,26 @@ export default function Home() {
       .replace(/[*_~`>#]/g, "")
       .replace(/\s+/g, " ")
       .trim();
+  }
+
+  async function copyMessage(message: Message) {
+    try {
+      await navigator.clipboard.writeText(message.body);
+    } catch {
+      // Older webviews without the async clipboard API.
+      const area = document.createElement("textarea");
+      area.value = message.body;
+      document.body.appendChild(area);
+      area.select();
+      document.execCommand("copy");
+      area.remove();
+    }
+    setCopiedMessageId(message.id);
+    window.setTimeout(
+      () =>
+        setCopiedMessageId((current) => (current === message.id ? null : current)),
+      1_600,
+    );
   }
 
   async function readAloud(message: Message) {
@@ -4448,6 +4469,16 @@ export default function Home() {
                         </small>
                       </span>
                     )}
+                  {message.status !== "streaming" && Boolean(message.body) && (
+                    <button
+                      type="button"
+                      className="message-action"
+                      onClick={() => void copyMessage(message)}
+                      aria-label={`Copy ${message.role === "user" ? "your message" : `${messageCompanion(message).name}’s reply`}`}
+                    >
+                      {copiedMessageId === message.id ? "✓ Copied" : "Copy"}
+                    </button>
+                  )}
                   {message.role === "user" &&
                     message.status !== "streaming" &&
                     Boolean(message.body) && (
