@@ -108,6 +108,28 @@ type Conversation = {
   updatedAt: string;
 };
 
+type ConnectorSummary = {
+  id: string;
+  name: string;
+  kind: "mcp" | "http";
+  url: string;
+  description: string;
+  enabled: boolean;
+  allowedTools: string;
+  authHeader: string;
+  hasAuth: boolean;
+};
+
+type ConnectorDraft = {
+  name: string;
+  kind: "mcp" | "http";
+  url: string;
+  authHeader: string;
+  authValue: string;
+  description: string;
+  allowedTools: string;
+};
+
 type ChatFolder = {
   id: string;
   name: string;
@@ -627,6 +649,17 @@ export default function Home() {
   const [memoryImportProgress, setMemoryImportProgress] = useState("");
   const [memoryShelf, setMemoryShelf] = useState<"shared" | "companion">("shared");
   const [memoryFragmentReview, setMemoryFragmentReview] = useState(false);
+  const [connectors, setConnectors] = useState<ConnectorSummary[]>([]);
+  const [connectorDraft, setConnectorDraft] = useState<ConnectorDraft>({
+    name: "",
+    kind: "mcp",
+    url: "",
+    authHeader: "",
+    authValue: "",
+    description: "",
+    allowedTools: "",
+  });
+  const [connectorBusy, setConnectorBusy] = useState(false);
   const [memoryCompanionId, setMemoryCompanionId] = useState(defaultCompanion.id);
   const [memoryImports, setMemoryImports] = useState<MemoryImport[]>([]);
   const [duplicateProposals, setDuplicateProposals] = useState<DuplicateProposal[]>([]);
@@ -1149,6 +1182,7 @@ export default function Home() {
   useEffect(() => {
     if (studioTab !== "connectors") return;
     void refreshPushState();
+    void refreshConnectors();
   }, [studioTab]);
 
   // Pull real charged spend whenever the Spending tab is open.
@@ -1871,6 +1905,98 @@ export default function Home() {
       return;
     }
     void attachFiles(event.dataTransfer.files);
+  }
+
+  async function refreshConnectors() {
+    try {
+      const response = await fetch("/api/connectors");
+      if (!response.ok) return;
+      const data = (await response.json()) as { connectors?: ConnectorSummary[] };
+      setConnectors(data.connectors || []);
+    } catch {
+      // Leave the list as-is when the load fails.
+    }
+  }
+
+  async function saveConnector() {
+    if (!connectorDraft.name.trim() || !connectorDraft.url.trim()) {
+      setNotice("A connector needs a name and an https:// URL.");
+      return;
+    }
+    setConnectorBusy(true);
+    try {
+      const response = await fetch("/api/connectors", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(connectorDraft),
+      });
+      const data = (await response.json()) as { error?: string };
+      if (!response.ok) throw new Error(data.error || "The connector could not be saved.");
+      setConnectorDraft({
+        name: "",
+        kind: "mcp",
+        url: "",
+        authHeader: "",
+        authValue: "",
+        description: "",
+        allowedTools: "",
+      });
+      await refreshConnectors();
+      setNotice("Connector saved.");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "The connector could not be saved.");
+    } finally {
+      setConnectorBusy(false);
+    }
+  }
+
+  async function setConnectorEnabled(connector: ConnectorSummary, enabled: boolean) {
+    try {
+      await fetch("/api/connectors", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...connector, authValue: "", enabled }),
+      });
+      await refreshConnectors();
+    } catch {
+      setNotice("The connector could not be updated.");
+    }
+  }
+
+  async function probeConnector(connector: ConnectorSummary) {
+    setConnectorBusy(true);
+    try {
+      const response = await fetch(
+        `/api/connectors?probe=${encodeURIComponent(connector.id)}`,
+      );
+      const data = (await response.json()) as {
+        tools?: Array<{ name: string }>;
+        error?: string;
+      };
+      if (!response.ok) throw new Error(data.error || "The connector did not respond.");
+      const names = (data.tools || []).map((tool) => tool.name);
+      setNotice(
+        names.length
+          ? `${connector.name}: ${names.length} tool${names.length === 1 ? "" : "s"} — ${names.slice(0, 6).join(", ")}${names.length > 6 ? "…" : ""}`
+          : `${connector.name} connected but offered no tools.`,
+      );
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "The connector did not respond.");
+    } finally {
+      setConnectorBusy(false);
+    }
+  }
+
+  async function deleteConnector(connector: ConnectorSummary) {
+    try {
+      await fetch(`/api/connectors?id=${encodeURIComponent(connector.id)}`, {
+        method: "DELETE",
+      });
+      await refreshConnectors();
+      setNotice(`${connector.name} removed.`);
+    } catch {
+      setNotice("The connector could not be removed.");
+    }
   }
 
   // Push notifications (PDF Phase 10).
@@ -6107,6 +6233,159 @@ export default function Home() {
                     </label>
                     <small>Search use is capped per reply. Sources are appended as clickable links when the provider returns citation metadata.</small>
                   </section>
+                  <section className="continuity-card notion-card">
+                    <div className="continuity-card-heading">
+                      <div>
+                        <strong>Connected services</strong>
+                        <p>Plug in MCP servers or HTTPS APIs your companions can use to take actions. Tools load only when a companion asks for that service, so idle connectors cost nothing on ordinary messages.</p>
+                      </div>
+                      <span className="memory-state" data-connected={connectors.some((item) => item.enabled) || undefined}>
+                        {connectors.filter((item) => item.enabled).length} on
+                      </span>
+                    </div>
+
+                    {connectors.map((connector) => (
+                      <div className="connector-row" key={connector.id}>
+                        <label className="connector-toggle">
+                          <input
+                            type="checkbox"
+                            checked={connector.enabled}
+                            onChange={(event) =>
+                              void setConnectorEnabled(connector, event.target.checked)
+                            }
+                          />
+                          <span>
+                            <strong>{connector.name}</strong>
+                            <small>
+                              {connector.kind === "mcp" ? "MCP server" : "HTTPS API"} ·{" "}
+                              {connector.url}
+                              {connector.hasAuth ? " · key saved" : ""}
+                            </small>
+                          </span>
+                        </label>
+                        <div className="connector-row-actions">
+                          <button
+                            type="button"
+                            onClick={() => void probeConnector(connector)}
+                            disabled={connectorBusy}
+                          >
+                            Test
+                          </button>
+                          <button
+                            type="button"
+                            className="forget-memory"
+                            onClick={() => void deleteConnector(connector)}
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                    {!connectors.length && (
+                      <p className="connector-empty">No connectors yet.</p>
+                    )}
+
+                    <div className="connector-form">
+                      <label>
+                        <span>Name</span>
+                        <input
+                          value={connectorDraft.name}
+                          onChange={(event) =>
+                            setConnectorDraft({ ...connectorDraft, name: event.target.value })
+                          }
+                          placeholder="Linear"
+                        />
+                      </label>
+                      <label>
+                        <span>Type</span>
+                        <select
+                          value={connectorDraft.kind}
+                          onChange={(event) =>
+                            setConnectorDraft({
+                              ...connectorDraft,
+                              kind: event.target.value as ConnectorDraft["kind"],
+                            })
+                          }
+                        >
+                          <option value="mcp">MCP server</option>
+                          <option value="http">HTTPS API</option>
+                        </select>
+                      </label>
+                      <label>
+                        <span>URL</span>
+                        <input
+                          value={connectorDraft.url}
+                          onChange={(event) =>
+                            setConnectorDraft({ ...connectorDraft, url: event.target.value })
+                          }
+                          placeholder="https://mcp.example.com/mcp"
+                        />
+                      </label>
+                      <label>
+                        <span>What it is for</span>
+                        <input
+                          value={connectorDraft.description}
+                          onChange={(event) =>
+                            setConnectorDraft({
+                              ...connectorDraft,
+                              description: event.target.value,
+                            })
+                          }
+                          placeholder="Task tracking — read and create issues"
+                        />
+                      </label>
+                      <label>
+                        <span>Auth header (optional)</span>
+                        <input
+                          value={connectorDraft.authHeader}
+                          onChange={(event) =>
+                            setConnectorDraft({
+                              ...connectorDraft,
+                              authHeader: event.target.value,
+                            })
+                          }
+                          placeholder="authorization"
+                        />
+                      </label>
+                      <label>
+                        <span>Auth value (optional)</span>
+                        <input
+                          type="password"
+                          value={connectorDraft.authValue}
+                          onChange={(event) =>
+                            setConnectorDraft({
+                              ...connectorDraft,
+                              authValue: event.target.value,
+                            })
+                          }
+                          placeholder="Bearer …"
+                        />
+                      </label>
+                      <label className="connector-form-wide">
+                        <span>Allowed tools (optional)</span>
+                        <input
+                          value={connectorDraft.allowedTools}
+                          onChange={(event) =>
+                            setConnectorDraft({
+                              ...connectorDraft,
+                              allowedTools: event.target.value,
+                            })
+                          }
+                          placeholder="Comma-separated. Leave blank to allow every tool the server offers."
+                        />
+                      </label>
+                      <button
+                        type="button"
+                        className="save-key"
+                        onClick={() => void saveConnector()}
+                        disabled={connectorBusy}
+                      >
+                        {connectorBusy ? "Saving…" : "Add connector"}
+                      </button>
+                    </div>
+                    <small>Auth values are stored on the server and never sent back to this screen. Editing a connector without retyping the value keeps the saved one.</small>
+                  </section>
+
                   <section className="continuity-card notion-card">
                     <div className="continuity-card-heading">
                       <div>

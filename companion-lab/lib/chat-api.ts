@@ -897,6 +897,7 @@ async function callProvider(
   groupMembers: GroupMember[] = [],
   groupReplyTargetContext: GroupReplyTargetContext | null = null,
   webSearchEnabled = false,
+  connectorTools: Array<{ name: string; description: string; parameters: Record<string, unknown> }> = [],
 ) {
   const key = providerKey(companion.provider, env, suppliedKey);
   if (!key) throw new Error(`The ${companion.provider} API key is not connected.`);
@@ -915,6 +916,11 @@ async function callProvider(
           },
         ]
       : []),
+    ...connectorTools.map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      input_schema: tool.parameters,
+    })),
   ];
 
   if (companion.provider === "anthropic") {
@@ -1138,7 +1144,7 @@ async function callProvider(
           .filter(Boolean)
           .join("\n\n"),
         input: messages,
-        ...(callTool || webSearchEnabled
+        ...(callTool || webSearchEnabled || connectorTools.length
           ? {
               tools: [
                 ...(webSearchEnabled ? [{ type: "web_search" }] : []),
@@ -1151,6 +1157,12 @@ async function callProvider(
                   strict: true,
                 },
                 ] : []),
+                ...connectorTools.map((tool) => ({
+                  type: "function",
+                  name: tool.name,
+                  description: tool.description,
+                  parameters: tool.parameters,
+                })),
               ],
               tool_choice: "auto",
             }
@@ -1255,17 +1267,29 @@ async function callProvider(
             ],
           }
         : {}),
-      ...(callTool
+      ...(callTool || connectorTools.length
         ? {
             tools: [
-              {
+              ...(callTool
+                ? [
+                    {
+                      type: "function",
+                      function: {
+                        name: callTool.name,
+                        description: callTool.description,
+                        parameters: callTool.parameters,
+                      },
+                    },
+                  ]
+                : []),
+              ...connectorTools.map((tool) => ({
                 type: "function",
                 function: {
-                  name: callTool.name,
-                  description: callTool.description,
-                  parameters: callTool.parameters,
+                  name: tool.name,
+                  description: tool.description,
+                  parameters: tool.parameters,
                 },
-              },
+              })),
             ],
             tool_choice: "auto",
           }

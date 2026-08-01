@@ -5220,3 +5220,89 @@ svg {
   font-size: 12px;
   cursor: pointer;
 }
+
+/* Connector management (PDF Phase 8). */
+.connector-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 0;
+  border-top: 1px solid var(--border-soft);
+}
+
+.connector-row .connector-toggle {
+  flex: 1;
+  min-width: 0;
+}
+
+.connector-row .connector-toggle small {
+  display: block;
+  overflow: hidden;
+  color: var(--muted-dim);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.connector-row-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
+.connector-row-actions button {
+  padding: 6px 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.connector-row-actions button:hover {
+  border-color: rgba(85, 191, 255, 0.45);
+  color: var(--text);
+}
+
+.connector-empty {
+  margin: 8px 0;
+  color: var(--muted-dim);
+  font-size: 12px;
+}
+
+.connector-form {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-soft);
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.connector-form-wide {
+  grid-column: 1 / -1;
+}
+
+.connector-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.connector-form input,
+.connector-form select {
+  padding: 8px 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 9px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.connector-form .save-key {
+  grid-column: 1 / -1;
+}
