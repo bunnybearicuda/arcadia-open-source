@@ -536,6 +536,11 @@ export default function Home() {
   const attachmentInputRef = useRef<HTMLInputElement>(null);
   const memoryImportInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  // Message ids the currently running local stream is feeding, so polling
+  // leaves them alone, plus the conversation the viewer is looking at now
+  // (read inside long-lived stream closures without stale-state issues).
+  const liveStreamIdsRef = useRef<Set<string>>(new Set());
+  const activeConversationIdRef = useRef("");
   const speechRecognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const activeAudioRef = useRef<HTMLAudioElement | null>(null);
   const voiceRequestRef = useRef<AbortController | null>(null);
@@ -544,6 +549,9 @@ export default function Home() {
   const [messages, setMessages] = useState(initialMessages);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState("kian-main");
+  useEffect(() => {
+    activeConversationIdRef.current = activeConversationId;
+  }, [activeConversationId]);
   const [conversationSearch, setConversationSearch] = useState("");
   const [loadingConversation, setLoadingConversation] = useState(false);
   const [creatingConversation, setCreatingConversation] = useState(false);
@@ -1089,16 +1097,17 @@ export default function Home() {
   }
 
   // A stored reply can still be generating server-side after this device
-  // dropped its stream (app closed or backgrounded mid-reply). While a
-  // stored message is marked streaming and no local stream is active, poll
-  // until the server finishes it; also refresh when the app returns to the
-  // foreground so a reply finished while away appears immediately.
-  const hasDetachedStreamingReply =
-    !sending &&
-    messages.some(
-      (message) =>
-        message.status === "streaming" && !message.id.startsWith("local-"),
-    );
+  // dropped its stream (app closed or backgrounded mid-reply), or in a
+  // thread other than the one the local stream is feeding. While a stored
+  // message is marked streaming and not owned by the live local stream,
+  // poll until the server finishes it; also refresh when the app returns
+  // to the foreground so a reply finished while away appears immediately.
+  const hasDetachedStreamingReply = messages.some(
+    (message) =>
+      message.status === "streaming" &&
+      !message.id.startsWith("local-") &&
+      !liveStreamIdsRef.current.has(message.id),
+  );
   useEffect(() => {
     if (!hasDetachedStreamingReply || !activeConversationId) return;
     const timer = window.setInterval(() => {
@@ -1204,7 +1213,7 @@ export default function Home() {
       setSidebarOpen(false);
       return;
     }
-    if (sending || conversationId === activeConversationId) {
+    if (conversationId === activeConversationId) {
       setSidebarOpen(false);
       return;
     }
@@ -1244,7 +1253,7 @@ export default function Home() {
   }
 
   async function createConversation() {
-    if (sending || creatingConversation) return;
+    if (creatingConversation) return;
     if (pendingAttachments.length) {
       setNotice("Send or remove the pending attachments before opening another room.");
       return;
@@ -3260,6 +3269,7 @@ export default function Home() {
               speakerStream.assistantId =
                 streamEvent.assistantMessageId ||
                 speakerStream.assistantId;
+              liveStreamIdsRef.current.add(speakerStream.assistantId);
               setMessages((current) =>
                 current.map((message) => {
                   if (
@@ -3611,6 +3621,7 @@ export default function Home() {
                   roomUserMessageId = streamEvent.userMessageId;
                 }
                 assistantId = streamEvent.assistantMessageId || assistantId;
+                liveStreamIdsRef.current.add(assistantId);
                 setMessages((current) =>
                   current.map((message) => {
                     if (
@@ -3713,6 +3724,13 @@ export default function Home() {
       }
     } finally {
       setSending(false);
+      liveStreamIdsRef.current.clear();
+      // If the viewer is looking at the thread this stream fed (they may
+      // have switched away and back mid-reply), reload it from the server
+      // so the stored reply text is authoritative and gap-free.
+      if (activeConversationIdRef.current === conversationId) {
+        void loadMessages(conversationId).catch(() => undefined);
+      }
       void refreshConversations().catch(() => undefined);
       void refreshUsage();
       void refreshOpenRouterCredits();
@@ -3761,7 +3779,7 @@ export default function Home() {
         <button
           className="new-chat"
           onClick={() => openChatCreator("solo")}
-          disabled={creatingConversation || sending}
+          disabled={creatingConversation}
         >
           <Icon><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg></Icon>
           {creatingConversation ? "Opening…" : "New chat"}
