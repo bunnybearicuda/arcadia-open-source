@@ -5149,3 +5149,64 @@ svg {
   flex: 1 1 0;
   min-width: 0;
 }
+
+/* Drag-and-drop attach (PDF Phase 7). */
+.drop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(4, 10, 18, 0.72);
+  backdrop-filter: blur(2px);
+  pointer-events: none;
+}
+
+.drop-overlay-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 26px 34px;
+  border: 2px dashed rgba(85, 191, 255, 0.7);
+  border-radius: 18px;
+  background: rgba(18, 49, 72, 0.92);
+  text-align: center;
+}
+
+.drop-overlay-card strong {
+  color: var(--text);
+  font-size: 16px;
+}
+
+.drop-overlay-card small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* Voice mode toggle (PDF Phase 6). */
+.voice-mode-toggle {
+  display: flex;
+  width: 42px;
+  height: 42px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-soft);
+  border-radius: 12px;
+  background: transparent;
+  color: var(--muted-dim);
+  cursor: pointer;
+}
+
+.voice-mode-toggle:hover {
+  border-color: rgba(85, 191, 255, 0.45);
+  color: #c9e8f6;
+}
+
+.voice-mode-toggle[data-on] {
+  border-color: rgba(67, 214, 162, 0.6);
+  background: rgba(67, 214, 162, 0.14);
+  color: var(--green-bright);
+}

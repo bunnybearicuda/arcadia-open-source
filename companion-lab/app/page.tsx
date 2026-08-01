@@ -307,6 +307,7 @@ const OPENROUTER_MANAGEMENT_KEY_STORAGE =
 const ELEVENLABS_KEY_STORAGE = "companion-lab.elevenlabs-key.v1";
 const VOICE_SETTINGS_STORAGE = "companion-lab.voice-settings.v1";
 const WEB_SEARCH_STORAGE = "companion-lab.web-search.v1";
+const VOICE_MODE_STORAGE = "companion-lab.voice-mode.v1";
 const DEFAULT_VOICE_TUNING: VoiceTuning = {
   stability: 0.5,
   similarityBoost: 0.75,
@@ -559,6 +560,10 @@ export default function Home() {
   const [folders, setFolders] = useState<ChatFolder[]>([]);
   const [menuConversationId, setMenuConversationId] = useState<string | null>(null);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+  const [dropActive, setDropActive] = useState(false);
+  const dragDepthRef = useRef(0);
+  const [voiceMode, setVoiceMode] = useState(false);
+  const spokenMessageIdsRef = useRef<Set<string>>(new Set());
   const [movePickerConversationId, setMovePickerConversationId] = useState<string | null>(null);
   const [newFolderDraft, setNewFolderDraft] = useState("");
   const [activeConversationId, setActiveConversationId] = useState("kian-main");
@@ -1115,6 +1120,31 @@ export default function Home() {
       voiceRequestRef.current?.abort();
     };
   }, []);
+
+  useEffect(() => {
+    void Promise.resolve().then(() => {
+      if (window.localStorage.getItem(VOICE_MODE_STORAGE) === "on") setVoiceMode(true);
+    });
+  }, []);
+
+  // Voice mode (PDF Phase 6): read each completed reply aloud as it lands,
+  // one at a time, skipping anything already on screen when it was switched on.
+  useEffect(() => {
+    if (!voiceMode || !elevenLabsKey) return;
+    if (speakingMessageId || generatingVoiceMessageId) return;
+    const next = messages.find(
+      (message) =>
+        message.role === "assistant" &&
+        message.status !== "streaming" &&
+        Boolean(message.body) &&
+        !message.id.startsWith("local-") &&
+        !spokenMessageIdsRef.current.has(message.id),
+    );
+    if (!next) return;
+    spokenMessageIdsRef.current.add(next.id);
+    void readAloud(next);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [voiceMode, messages, speakingMessageId, generatingVoiceMessageId, elevenLabsKey]);
 
   useEffect(() => {
     const media = window.matchMedia("(display-mode: standalone)");
@@ -1697,6 +1727,38 @@ export default function Home() {
       .replace(/[*_~`>#]/g, "")
       .replace(/\s+/g, " ")
       .trim();
+  }
+
+  // Drag-and-drop anywhere on the app (PDF Phase 7). Depth counting keeps
+  // the overlay stable while the pointer crosses child elements.
+  function handleDragEnter(event: React.DragEvent) {
+    if (!Array.from(event.dataTransfer.types || []).includes("Files")) return;
+    event.preventDefault();
+    dragDepthRef.current += 1;
+    setDropActive(true);
+  }
+
+  function handleDragOver(event: React.DragEvent) {
+    if (!Array.from(event.dataTransfer.types || []).includes("Files")) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+  }
+
+  function handleDragLeave() {
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+    if (!dragDepthRef.current) setDropActive(false);
+  }
+
+  function handleDrop(event: React.DragEvent) {
+    if (!Array.from(event.dataTransfer.types || []).includes("Files")) return;
+    event.preventDefault();
+    dragDepthRef.current = 0;
+    setDropActive(false);
+    if (!activeConversation) {
+      setNotice("Open a chat before dropping files in.");
+      return;
+    }
+    void attachFiles(event.dataTransfer.files);
   }
 
   async function copyMessage(message: Message) {
@@ -4101,6 +4163,11 @@ export default function Home() {
   return (
     <main
       className="app-shell"
+      data-drop-active={dropActive || undefined}
+      onDragEnter={handleDragEnter}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
       style={
         {
           "--kian": companion.accent,
@@ -4109,6 +4176,14 @@ export default function Home() {
         } as React.CSSProperties
       }
     >
+      {dropActive && (
+        <div className="drop-overlay" aria-hidden="true">
+          <div className="drop-overlay-card">
+            <strong>Drop to attach</strong>
+            <small>Up to four files travel with one message</small>
+          </div>
+        </div>
+      )}
       <button
         className="mobile-backdrop"
         data-open={sidebarOpen}
@@ -4739,6 +4814,48 @@ export default function Home() {
               />
               <small>Enter for a new line · tap the arrow to send</small>
             </label>
+            <button
+              type="button"
+              className="voice-mode-toggle"
+              data-on={voiceMode || undefined}
+              aria-pressed={voiceMode}
+              aria-label={
+                voiceMode
+                  ? "Turn off voice mode (replies read aloud)"
+                  : "Turn on voice mode (read every reply aloud)"
+              }
+              title={
+                voiceMode
+                  ? "Voice mode on — every reply is read aloud"
+                  : "Voice mode — read every reply aloud"
+              }
+              onClick={() => {
+                const next = !voiceMode;
+                setVoiceMode(next);
+                window.localStorage.setItem(
+                  VOICE_MODE_STORAGE,
+                  next ? "on" : "off",
+                );
+                if (!next) {
+                  activeAudioRef.current?.pause();
+                  setSpeakingMessageId(null);
+                } else {
+                  // Only read replies that land from here on.
+                  for (const item of messages) spokenMessageIdsRef.current.add(item.id);
+                }
+              }}
+            >
+              <Icon size={23}>
+                <svg viewBox="0 0 24 24">
+                  <path d="M11 5 6 9H3v6h3l5 4z" />
+                  {voiceMode ? (
+                    <path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13" />
+                  ) : (
+                    <path d="M16 9l5 6M21 9l-5 6" />
+                  )}
+                </svg>
+              </Icon>
+            </button>
             <button
               type="button"
               className="dictate"
