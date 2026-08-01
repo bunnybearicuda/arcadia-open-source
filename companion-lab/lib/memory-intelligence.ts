@@ -1,6 +1,8 @@
 import { strFromU8, unzipSync } from "fflate";
 import type { CompanionApiEnv } from "./companion-api";
-import { initializeMemoryStorage } from "./memory-api";
+import { initializeMemoryStorage, notionMirrorConfig } from "./memory-api";
+import { flushMemorySync, saveMemoriesDeduped } from "./memory-store";
+import { supabaseMemoryConfig } from "./supabase-memory";
 import { estimateCost } from "./pricing";
 
 type Provider = "anthropic" | "openai" | "openrouter";
@@ -384,49 +386,14 @@ async function extractWithProvider(
   };
 }
 
-function canonical(value: string) {
-  return value.toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
-}
-
 async function saveCandidates(
   database: D1Database,
   companionId: string,
   rows: Candidate[],
   source: string,
 ) {
-  const existing = await database
-    .prepare(`SELECT content FROM memories WHERE active = 1 AND owner_id IN (?, 'shared')`)
-    .bind(companionId)
-    .all<{ content: string }>();
-  const seen = new Set((existing.results || []).map((row) => canonical(row.content)));
-  let shared = 0;
-  let privateCount = 0;
-  for (const row of rows) {
-    const fingerprint = canonical(row.content);
-    if (!fingerprint || seen.has(fingerprint)) continue;
-    seen.add(fingerprint);
-    const ownerId = row.scope === "shared" ? "shared" : companionId;
-    await database
-      .prepare(
-        `INSERT INTO memories (
-           id, owner_id, scope, category, content, source, priority, pinned
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .bind(
-        crypto.randomUUID(),
-        ownerId,
-        row.scope,
-        row.category,
-        row.content,
-        source.slice(0, 120),
-        row.priority,
-        row.pinned ? 1 : 0,
-      )
-      .run();
-    if (row.scope === "shared") shared += 1;
-    else privateCount += 1;
-  }
-  return { saved: shared + privateCount, shared, private: privateCount };
+  const saved = await saveMemoriesDeduped(database, companionId, rows, source);
+  return { saved: saved.saved, shared: saved.shared, private: saved.private };
 }
 
 async function recordRun(
@@ -797,6 +764,11 @@ export async function handleMemoryImportApi(request: Request, env: CompanionApiE
         .bind(saved, shared, privateCount, importId, companion.id)
         .run();
     }
+    await flushMemorySync(
+      env.DB,
+      supabaseMemoryConfig(request, env),
+      await notionMirrorConfig(request, env.DB),
+    );
     return Response.json(
       {
         imported: saved,

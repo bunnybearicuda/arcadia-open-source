@@ -1,14 +1,19 @@
 import type { CompanionApiEnv } from "./companion-api";
 import {
-  deactivateSupabaseMemories,
   listSupabaseMemories,
   searchSupabaseMemories,
   supabaseMemoryConfig,
-  upsertSupabaseMemories,
   type SupabaseMemoryConfig,
 } from "./supabase-memory";
-import { mirrorMemoriesToNotion } from "./notion-mirror";
 import { filterAndRankMemoryBrowser } from "./memory-matching";
+import {
+  CREATE_MEMORY_SYNC_OUTBOX,
+  enqueueMemorySync,
+  flushMemorySync,
+  saveMemoriesDeduped,
+  selectMemoryPromptRows,
+  type NotionMirrorConfig,
+} from "./memory-store";
 
 const CREATE_USER_PROFILES = `
   CREATE TABLE IF NOT EXISTS user_profiles (
@@ -87,27 +92,6 @@ export type MemoryRow = {
   updated_at: string;
 };
 
-const STOP_WORDS = new Set([
-  "about", "after", "again", "also", "and", "are", "because", "been", "before",
-  "being", "but", "can", "could", "did", "does", "for", "from", "had", "has",
-  "have", "her", "here", "him", "his", "how", "into", "its", "just", "like",
-  "more", "most", "not", "now", "our", "out", "she", "should", "some", "than",
-  "that", "the", "their", "them", "then", "there", "these", "they", "this",
-  "those", "through", "too", "very", "was", "what", "when", "where", "which",
-  "who", "why", "will", "with", "would", "you", "your",
-]);
-
-const CONCEPTS: Record<string, string[]> = {
-  child: ["child", "children", "kid", "kids", "kiddo", "kiddos", "son", "sons", "daughter", "daughters"],
-  name: ["name", "names", "named", "called"],
-  birthday: ["birthday", "birthdate", "born"],
-  partner: ["partner", "spouse", "husband", "wife", "married", "marriage"],
-  preference: ["prefer", "prefers", "preference", "favorite", "favourite", "like", "likes", "love", "loves"],
-  rule: ["rule", "rules", "boundary", "boundaries", "instruction", "instructions"],
-  work: ["work", "works", "job", "career", "profession"],
-  home: ["home", "house", "live", "lives", "location"],
-};
-
 function text(value: unknown, fallback = "") {
   return typeof value === "string" ? value.trim() : fallback;
 }
@@ -119,7 +103,10 @@ function json(body: unknown, status = 200) {
   });
 }
 
-async function notionMirrorConfig(request: Request, database: D1Database) {
+export async function notionMirrorConfig(
+  request: Request,
+  database: D1Database,
+): Promise<NotionMirrorConfig | null> {
   const token = (request.headers.get("x-companion-notion-key") || "").trim();
   if (!token) return null;
   const profile = await database
@@ -160,64 +147,11 @@ function memoryShape(row: MemoryRow) {
   };
 }
 
-function normalizedWords(value: string) {
-  const raw = value
-    .toLocaleLowerCase()
-    .normalize("NFKD")
-    .replace(/\p{Diacritic}/gu, "")
-    .split(/[^\p{L}\p{N}]+/u)
-    .filter((word) => word.length >= 2 && !STOP_WORDS.has(word));
-  const concepts = new Map<string, string>();
-  for (const [concept, variants] of Object.entries(CONCEPTS)) {
-    for (const variant of variants) concepts.set(variant, concept);
-  }
-  return new Set(
-    raw.map((word) => {
-      const concept = concepts.get(word);
-      if (concept) return concept;
-      if (word.length > 5 && word.endsWith("ing")) return word.slice(0, -3);
-      if (word.length > 4 && word.endsWith("ed")) return word.slice(0, -2);
-      if (word.length > 4 && word.endsWith("s")) return word.slice(0, -1);
-      return word;
-    }),
-  );
-}
-
-function memoryScore(memory: MemoryRow, queryWords: Set<string>) {
-  const words = normalizedWords(`${memory.category} ${memory.content}`);
-  let overlap = 0;
-  for (const word of queryWords) if (words.has(word)) overlap += 1;
-  return (
-    (memory.pinned ? 10_000 : 0) +
-    Math.max(0, Number(memory.priority) || 0) * 100 +
-    overlap * 1_000
-  );
-}
-
-function selectedMemories(rows: MemoryRow[], query: string, limit = 40) {
-  const queryWords = normalizedWords(query);
-  const scored = rows
-    .map((memory, index) => ({ memory, index, score: memoryScore(memory, queryWords) }))
-    .sort((a, b) => b.score - a.score || a.index - b.index);
-
-  // A small memory base should be fully present. Once it grows, pinned/high-priority
-  // continuity and the most relevant items share a bounded prompt budget.
-  const selected = rows.length <= limit ? rows : scored.slice(0, limit).map((item) => item.memory);
-  const result: MemoryRow[] = [];
-  let characters = 0;
-  for (const memory of selected) {
-    const size = memory.content.length + memory.category.length + 8;
-    if (characters + size > 18_000 && result.length >= 8) continue;
-    result.push(memory);
-    characters += size;
-  }
-  return result;
-}
-
 export async function initializeMemoryStorage(database: D1Database) {
   await database.prepare(CREATE_USER_PROFILES).run();
   await database.prepare(CREATE_MEMORIES).run();
   await database.prepare(CREATE_MEMORY_MAINTENANCE).run();
+  await database.prepare(CREATE_MEMORY_SYNC_OUTBOX).run();
   await database
     .prepare("INSERT OR IGNORE INTO memory_maintenance (id) VALUES ('workspace')")
     .run();
@@ -276,7 +210,7 @@ export async function loadLongTermContext(
         .filter(Boolean)
         .join("\n")
     : "";
-  const chosen = selectedMemories(memories.results || [], query);
+  const chosen = selectMemoryPromptRows(memories.results || [], query);
   const memoryBlock = chosen
     .map((memory) => `- [${memory.category}] ${memory.content}`)
     .join("\n");
@@ -295,6 +229,9 @@ export async function handleMemoryApi(
     const notionConfig = await notionMirrorConfig(request, env.DB);
 
     if (request.method === "GET") {
+      // Any read with live credentials catches up sync work that earlier
+      // requests queued but could not deliver.
+      await flushMemorySync(env.DB, remoteConfig, notionConfig);
       if (url.searchParams.get("export") === "all") {
         const profile = await env.DB
           .prepare(
@@ -453,35 +390,35 @@ export async function handleMemoryApi(
       const companionId = text(body.companionId, "kian").slice(0, 100);
       const ownerId = text(body.ownerId) === "shared" ? "shared" : companionId;
       const scope = ownerId === "shared" ? "shared" : "private";
-      const id = crypto.randomUUID();
-      await env.DB
-        .prepare(
-          `INSERT INTO memories (
-           id, owner_id, scope, category, content, source, priority, pinned
-           ) VALUES (?, ?, ?, ?, ?, 'manual', ?, ?)`,
-        )
-        .bind(
-          id,
-          ownerId,
-          scope,
-          allowedCategories.has(category) ? category : "memory",
-          content,
-          category === "rule" || category === "correction" ? 5 : 2,
-          category === "rule" || category === "correction" ? 1 : 0,
-        )
-        .run();
+      const saved = await saveMemoriesDeduped(
+        env.DB,
+        companionId,
+        [
+          {
+            content,
+            category: allowedCategories.has(category) ? category : "memory",
+            scope,
+            priority: category === "rule" || category === "correction" ? 5 : 2,
+            pinned: category === "rule" || category === "correction",
+          },
+        ],
+        "manual",
+      );
+      if (!saved.saved) {
+        return json(
+          { error: "That is already remembered — an existing memory says the same thing." },
+          409,
+        );
+      }
       const memory = await env.DB
         .prepare(
           `SELECT id, owner_id, scope, category, content, source, source_ref,
                   source_url, priority, pinned, active, created_at, updated_at
            FROM memories WHERE id = ?`,
         )
-        .bind(id)
+        .bind(saved.ids[0])
         .first<MemoryRow>();
-      if (remoteConfig && memory) await upsertSupabaseMemories(remoteConfig, [memory]);
-      if (notionConfig && memory) {
-        await mirrorMemoriesToNotion(env.DB, notionConfig.token, notionConfig.source, [memory]);
-      }
+      await flushMemorySync(env.DB, remoteConfig, notionConfig);
       return json({ memory: memory ? memoryShape(memory) : null }, 201);
     }
 
@@ -553,10 +490,8 @@ export async function handleMemoryApi(
         )
         .bind(id)
         .first<MemoryRow>();
-      if (remoteConfig && memory) await upsertSupabaseMemories(remoteConfig, [memory]);
-      if (notionConfig && memory) {
-        await mirrorMemoriesToNotion(env.DB, notionConfig.token, notionConfig.source, [memory]);
-      }
+      if (memory) await enqueueMemorySync(env.DB, [memory.id]);
+      await flushMemorySync(env.DB, remoteConfig, notionConfig);
       return json({ memory: memory ? memoryShape(memory) : null });
     }
 
@@ -585,25 +520,8 @@ export async function handleMemoryApi(
             .run();
           forgotten.push(memoryId);
         }
-        if (remoteConfig && forgotten.length) {
-          await deactivateSupabaseMemories(remoteConfig, forgotten);
-        }
-        if (notionConfig && forgotten.length) {
-          const forgottenRows = await env.DB
-            .prepare(
-              `SELECT id, owner_id, scope, category, content, source, source_ref,
-                      source_url, priority, pinned, active, created_at, updated_at
-               FROM memories WHERE id IN (${forgotten.map(() => "?").join(",")})`,
-            )
-            .bind(...forgotten)
-            .all<MemoryRow>();
-          await mirrorMemoriesToNotion(
-            env.DB,
-            notionConfig.token,
-            notionConfig.source,
-            forgottenRows.results || [],
-          );
-        }
+        await enqueueMemorySync(env.DB, forgotten);
+        await flushMemorySync(env.DB, remoteConfig, notionConfig);
         return json({ forgottenIds: forgotten, forgottenCount: forgotten.length });
       }
       if (!id) return json({ error: "Choose a memory first." }, 400);
@@ -622,25 +540,8 @@ export async function handleMemoryApi(
         )
         .bind(id)
         .run();
-      if (remoteConfig) await deactivateSupabaseMemories(remoteConfig, [id]);
-      if (notionConfig) {
-        const forgotten = await env.DB
-          .prepare(
-            `SELECT id, owner_id, scope, category, content, source, source_ref,
-                    source_url, priority, pinned, active, created_at, updated_at
-             FROM memories WHERE id = ?`,
-          )
-          .bind(id)
-          .first<MemoryRow>();
-        if (forgotten) {
-          await mirrorMemoriesToNotion(
-            env.DB,
-            notionConfig.token,
-            notionConfig.source,
-            [forgotten],
-          );
-        }
-      }
+      await enqueueMemorySync(env.DB, [id]);
+      await flushMemorySync(env.DB, remoteConfig, notionConfig);
       return json({ forgotten: id });
     }
 

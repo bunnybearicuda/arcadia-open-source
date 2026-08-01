@@ -41,27 +41,43 @@ stable
 security definer
 set search_path = public
 as $$
+  -- Split retrieval budget: pinned continuity keeps a bounded number of
+  -- guaranteed slots, and the rest of the budget is ranked by relevance to
+  -- the query, so pinned rules can never crowd out the memories the current
+  -- conversation actually needs.
   with ranked as (
     select m.*,
       case
         when nullif(trim(p_query), '') is null then 0
-        else ts_rank_cd(m.search_vector, websearch_to_tsquery('english', p_query))
-      end as text_rank,
-      case
-        when nullif(trim(p_query), '') is null then 0
-        else similarity(lower(m.content), lower(p_query))
-      end as fuzzy_rank
+        else greatest(
+          ts_rank_cd(m.search_vector, websearch_to_tsquery('english', p_query)) * 3,
+          similarity(lower(m.content), lower(p_query))
+        )
+      end as relevance
     from public.memories m
     where m.active = true
       and m.owner_id in (p_companion_id, 'shared')
+  ),
+  pinned_rows as (
+    select * from ranked
+    where pinned
+    order by priority desc, relevance desc, updated_at desc
+    limit least(greatest(least(greatest(p_limit, 1), 100) / 3, 5), 15)
+  ),
+  relevant_rows as (
+    select * from ranked
+    where id not in (select id from pinned_rows)
+    order by relevance desc, priority desc, updated_at desc
+    limit least(greatest(p_limit, 1), 100)
   )
   select id, owner_id, scope, category, content, source, source_ref, source_url,
          priority, pinned, active, notion_page_id, created_at, updated_at, search_vector
-  from ranked
-  order by pinned desc,
-           priority desc,
-           greatest(text_rank * 3, fuzzy_rank) desc,
-           updated_at desc
+  from (
+    select * from pinned_rows
+    union all
+    select * from relevant_rows
+  ) combined
+  order by pinned desc, relevance desc, priority desc, updated_at desc
   limit least(greatest(p_limit, 1), 100);
 $$;
 

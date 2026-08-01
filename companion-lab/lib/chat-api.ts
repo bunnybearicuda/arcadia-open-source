@@ -4,12 +4,13 @@ import {
   initializeAttachmentStorage,
   type AttachmentRow,
 } from "./attachment-api";
-import { loadLongTermContext } from "./memory-api";
+import { loadLongTermContext, notionMirrorConfig } from "./memory-api";
 import {
   extractConversationMemory,
   initializeMemoryIntelligence,
   rememberExplicitly,
 } from "./memory-intelligence";
+import { flushMemorySync } from "./memory-store";
 import { estimateCost } from "./pricing";
 import { identityTurnActivation } from "./identity-runtime";
 import {
@@ -18,8 +19,7 @@ import {
   mentionedGroupMemberIds,
   providerToolTracker,
 } from "./group-routing";
-import { supabaseMemoryConfig, upsertSupabaseMemories } from "./supabase-memory";
-import { mirrorMemoriesToNotion } from "./notion-mirror";
+import { supabaseMemoryConfig } from "./supabase-memory";
 
 const CREATE_CONVERSATIONS = `
   CREATE TABLE IF NOT EXISTS conversations (
@@ -2427,50 +2427,11 @@ export async function handleChatApi(
                 };
               }
             }
-            if (remoteMemoryConfig && memoryUpdate?.saved) {
-              const recentMemories = await env.DB
-                .prepare(
-                  `SELECT id, owner_id, scope, category, content, source, source_ref,
-                          source_url, priority, pinned, active, created_at, updated_at
-                   FROM memories
-                   WHERE active = 1 AND owner_id IN (?, 'shared')
-                   ORDER BY updated_at DESC
-                   LIMIT 20`,
-                )
-                .bind(companion.id)
-                .all<import("./memory-api").MemoryRow>();
-              await upsertSupabaseMemories(
-                remoteMemoryConfig,
-                recentMemories.results || [],
-              );
-            }
-            const notionToken = (
-              request.headers.get("x-companion-notion-key") || ""
-            ).trim();
-            if (notionToken && memoryUpdate?.saved) {
-              const profile = await env.DB
-                .prepare("SELECT notion_source FROM user_profiles WHERE id = 'becca'")
-                .first<{ notion_source: string }>();
-              if (profile?.notion_source) {
-                const recentMemories = await env.DB
-                  .prepare(
-                    `SELECT id, owner_id, scope, category, content, source, source_ref,
-                            source_url, priority, pinned, active, created_at, updated_at
-                     FROM memories
-                     WHERE active = 1 AND owner_id IN (?, 'shared')
-                     ORDER BY updated_at DESC
-                     LIMIT 10`,
-                  )
-                  .bind(companion.id)
-                  .all<import("./memory-api").MemoryRow>();
-                await mirrorMemoriesToNotion(
-                  env.DB,
-                  notionToken,
-                  profile.notion_source,
-                  recentMemories.results || [],
-                );
-              }
-            }
+            await flushMemorySync(
+              env.DB,
+              remoteMemoryConfig,
+              await notionMirrorConfig(request, env.DB),
+            );
           } catch {
             // Memory consolidation must never eat a completed chat reply.
           }
