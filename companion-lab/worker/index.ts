@@ -14,6 +14,7 @@ import { handleVoiceApi } from "../lib/voice-api";
 import { handleProviderCreditApi } from "../lib/provider-credit-api";
 import { handleSupabaseMemoryApi } from "../lib/supabase-memory";
 import { handleMemoryDedupeApi } from "../lib/memory-dedupe";
+import { handlePushApi } from "../lib/push-api";
 
 interface Env {
   ASSETS: Fetcher;
@@ -67,6 +68,10 @@ const worker = {
 
     if (url.pathname === "/api/folders") {
       return handleFolderApi(request, env);
+    }
+
+    if (url.pathname === "/api/push") {
+      return handlePushApi(request, env);
     }
 
     if (url.pathname === "/api/memory") {

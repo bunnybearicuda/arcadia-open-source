@@ -1,4 +1,4 @@
-const CACHE_NAME = "companion-lab-v1";
+const CACHE_NAME = "companion-lab-v2";
 const APP_SHELL = [
   "/manifest.webmanifest",
   "/companion-lab-icon.svg",
@@ -52,6 +52,44 @@ self.addEventListener("fetch", (event) => {
         }
         return response;
       });
+    }),
+  );
+});
+
+// Push notifications (PDF Phase 10). Payloads arrive already shaped by the
+// worker; a failed parse still shows something rather than nothing.
+self.addEventListener("push", (event) => {
+  let payload = {};
+  try {
+    payload = event.data ? event.data.json() : {};
+  } catch {
+    payload = {};
+  }
+  const title = payload.title || "Companion Lab";
+  const options = {
+    body: payload.body || "",
+    icon: "/icons/icon-192.png",
+    badge: "/icons/icon-192.png",
+    tag: payload.tag || "companion-lab",
+    renotify: false,
+    data: { url: payload.url || "/" },
+  };
+  event.waitUntil(self.registration.showNotification(title, options));
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const target = (event.notification.data && event.notification.data.url) || "/";
+  event.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) => {
+      // Focus an open tab when there is one instead of opening a duplicate.
+      for (const client of clients) {
+        if (client.url.includes(self.location.origin) && "focus" in client) {
+          client.navigate(target);
+          return client.focus();
+        }
+      }
+      return self.clients.openWindow(target);
     }),
   );
 });
