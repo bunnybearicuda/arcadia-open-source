@@ -4953,3 +4953,199 @@ svg {
   display: grid;
   gap: 0.25rem;
 }
+
+/* Sidebar sections: pinned, folders, and automatic companion groups. */
+.chat-section {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 10px;
+}
+
+.chat-section-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 4px 2px 2px;
+  color: var(--muted-dim);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.chat-section-remove {
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted-dim);
+  cursor: pointer;
+  opacity: 0.6;
+}
+
+.chat-section-remove:hover,
+.chat-section-remove:focus-visible {
+  background: rgba(210, 113, 135, 0.12);
+  color: #f0a8ba;
+  opacity: 1;
+}
+
+.chat-section-empty {
+  margin: 2px 2px 6px;
+  color: var(--muted-dim);
+  font-size: 11px;
+}
+
+.chat-row {
+  position: relative;
+}
+
+.chat-row-more {
+  width: 34px;
+  height: 38px;
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: #7e9aae;
+  cursor: pointer;
+  font-size: 16px;
+  opacity: 0.72;
+}
+
+.chat-row:hover .chat-row-more,
+.chat-row-more:focus-visible,
+.chat-row-more[aria-expanded="true"] {
+  background: rgba(85, 191, 255, 0.09);
+  color: #c9e8f6;
+  opacity: 1;
+}
+
+.chat-row-menu {
+  display: flex;
+  flex-basis: 100%;
+  min-width: 0;
+  flex-direction: column;
+  margin-top: 6px;
+  padding: 6px 2px 2px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.chat-row-menu button[role="menuitem"] {
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12.5px;
+  text-align: left;
+}
+
+.chat-row-menu button[role="menuitem"]:hover,
+.chat-row-menu button[role="menuitem"]:focus-visible {
+  background: rgba(85, 191, 255, 0.12);
+}
+
+.chat-row-menu button[role="menuitem"]:disabled {
+  color: var(--muted-dim);
+  cursor: default;
+  background: transparent;
+}
+
+.chat-row-menu-danger[role="menuitem"] {
+  color: #f0a8ba;
+}
+
+.chat-row-menu-danger[role="menuitem"]:hover,
+.chat-row-menu-danger[role="menuitem"]:focus-visible {
+  background: rgba(210, 113, 135, 0.14);
+}
+
+.chat-row-menu-title {
+  margin: 4px 10px;
+  color: var(--muted-dim);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.chat-row-menu-newfolder {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+  padding: 4px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.chat-row-menu-newfolder input {
+  min-width: 0;
+  flex: 1;
+  padding: 7px 9px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.chat-row-menu-newfolder button {
+  padding: 0 10px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--green);
+  color: #04241a;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.chat-row-menu-newfolder button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* One-tap Memory and Companion Lab entries pinned above the chat list. */
+.sidebar-quick-links {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: -4px 0 12px;
+  padding: 4px;
+  border: 1px solid var(--border-soft);
+  border-radius: 12px;
+  background: rgba(13, 28, 43, 0.55);
+}
+
+.sidebar-quick-links button {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 11px;
+  padding: 8px 9px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.sidebar-quick-links button:hover,
+.sidebar-quick-links button:focus-visible {
+  background: rgba(85, 191, 255, 0.09);
+}
+
+.chat-row[data-menu-open] {
+  flex-wrap: wrap;
+}
+
+.chat-row[data-menu-open] .chat-row-main {
+  width: auto;
+  flex: 1 1 0;
+  min-width: 0;
+}

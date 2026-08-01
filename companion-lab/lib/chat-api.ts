@@ -241,11 +241,21 @@ function json(body: unknown, status = 200) {
   });
 }
 
+const CREATE_FOLDERS = `
+  CREATE TABLE IF NOT EXISTS folders (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    position INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )
+`;
+
 export async function initializeChatStorage(database: D1Database) {
   await database.prepare(CREATE_CONVERSATIONS).run();
   await database.prepare(CREATE_DELETED_CONVERSATIONS).run();
   await database.prepare(CREATE_MESSAGES).run();
   await database.prepare(CREATE_CONVERSATION_MEMBERS).run();
+  await database.prepare(CREATE_FOLDERS).run();
   await initializeAttachmentStorage(database);
   await initializeMemoryIntelligence(database);
   const conversationColumns = await database
@@ -258,6 +268,12 @@ export async function initializeChatStorage(database: D1Database) {
   }
   if (!(conversationColumns.results || []).some((column) => column.name === "archived_at")) {
     await database.prepare("ALTER TABLE conversations ADD COLUMN archived_at TEXT").run();
+  }
+  if (!(conversationColumns.results || []).some((column) => column.name === "folder_id")) {
+    await database.prepare("ALTER TABLE conversations ADD COLUMN folder_id TEXT").run();
+  }
+  if (!(conversationColumns.results || []).some((column) => column.name === "pinned_at")) {
+    await database.prepare("ALTER TABLE conversations ADD COLUMN pinned_at TEXT").run();
   }
   const memberColumns = await database
     .prepare("PRAGMA table_info(conversation_members)")

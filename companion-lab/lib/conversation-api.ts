@@ -10,10 +10,18 @@ type ConversationRow = {
   kind: "solo" | "group";
   title: string;
   archived_at: string | null;
+  folder_id: string | null;
+  pinned_at: string | null;
   created_at: string;
   updated_at: string;
   last_content_json: string | null;
   message_count: number;
+};
+
+type FolderRow = {
+  id: string;
+  name: string;
+  position: number;
 };
 
 type MemberRow = {
@@ -50,6 +58,90 @@ function json(body: unknown, status = 200) {
   });
 }
 
+async function folderList(database: D1Database) {
+  const result = await database
+    .prepare(
+      `SELECT id, name, position FROM folders
+       ORDER BY position ASC, name COLLATE NOCASE ASC`,
+    )
+    .all<FolderRow>();
+  return (result.results || []).map((row) => ({
+    id: row.id,
+    name: row.name,
+    position: Number(row.position) || 0,
+  }));
+}
+
+export async function handleFolderApi(
+  request: Request,
+  env: CompanionApiEnv,
+): Promise<Response> {
+  try {
+    await initializeChatStorage(env.DB);
+
+    if (request.method === "GET") {
+      return json({ folders: await folderList(env.DB) });
+    }
+
+    if (request.method === "POST") {
+      const body = (await request.json().catch(() => ({}))) as { name?: unknown };
+      const name = typeof body.name === "string" ? body.name.trim().slice(0, 60) : "";
+      if (!name) return json({ error: "Give the folder a name first." }, 400);
+      const existing = await env.DB
+        .prepare("SELECT id FROM folders WHERE name = ? COLLATE NOCASE")
+        .bind(name)
+        .first<{ id: string }>();
+      if (existing) {
+        return json({ folder: { id: existing.id, name, position: 0 } }, 200);
+      }
+      const id = crypto.randomUUID();
+      const top = await env.DB
+        .prepare("SELECT COALESCE(MAX(position), 0) AS top FROM folders")
+        .first<{ top: number }>();
+      await env.DB
+        .prepare("INSERT INTO folders (id, name, position) VALUES (?, ?, ?)")
+        .bind(id, name, (Number(top?.top) || 0) + 1)
+        .run();
+      return json({ folder: { id, name, position: (Number(top?.top) || 0) + 1 } }, 201);
+    }
+
+    if (request.method === "PATCH") {
+      const body = (await request.json().catch(() => ({}))) as {
+        id?: unknown;
+        name?: unknown;
+      };
+      const id = typeof body.id === "string" ? body.id.trim().slice(0, 100) : "";
+      const name = typeof body.name === "string" ? body.name.trim().slice(0, 60) : "";
+      if (!id || !name) return json({ error: "Choose a folder and give it a name." }, 400);
+      const result = await env.DB
+        .prepare("UPDATE folders SET name = ? WHERE id = ?")
+        .bind(name, id)
+        .run();
+      if (!result.meta.changes) return json({ error: "That folder could not be found." }, 404);
+      return json({ folders: await folderList(env.DB) });
+    }
+
+    if (request.method === "DELETE") {
+      const url = new URL(request.url);
+      const id = (url.searchParams.get("id") || "").trim().slice(0, 100);
+      if (!id) return json({ error: "Choose a folder to remove." }, 400);
+      // Chats in the folder go back to their automatic groups; nothing is deleted.
+      await env.DB.batch([
+        env.DB.prepare("UPDATE conversations SET folder_id = NULL WHERE folder_id = ?").bind(id),
+        env.DB.prepare("DELETE FROM folders WHERE id = ?").bind(id),
+      ]);
+      return json({ ok: true, deletedId: id, folders: await folderList(env.DB) });
+    }
+
+    return json({ error: "Method not allowed." }, 405);
+  } catch (error) {
+    return json(
+      { error: error instanceof Error ? error.message : "Folder management failed." },
+      500,
+    );
+  }
+}
+
 async function conversationList(database: D1Database) {
   const result = await database
     .prepare(
@@ -59,6 +151,8 @@ async function conversationList(database: D1Database) {
          c.kind,
          c.title,
          c.archived_at,
+         c.folder_id,
+         c.pinned_at,
          c.created_at,
          c.updated_at,
          (
@@ -111,6 +205,8 @@ async function conversationList(database: D1Database) {
     kind: row.kind || "solo",
     title: row.title,
     archivedAt: row.archived_at,
+    folderId: row.folder_id,
+    pinnedAt: row.pinned_at,
     preview: messageText(row.last_content_json),
     messageCount: Number(row.message_count) || 0,
     members: (byConversation.get(row.id) || []).map((member) => ({
@@ -136,7 +232,10 @@ export async function handleConversationApi(
     await initializeChatStorage(env.DB);
 
     if (request.method === "GET") {
-      return json({ conversations: await conversationList(env.DB) });
+      return json({
+        conversations: await conversationList(env.DB),
+        folders: await folderList(env.DB),
+      });
     }
 
     if (request.method === "POST") {
@@ -211,13 +310,17 @@ export async function handleConversationApi(
         provider?: unknown;
         model?: unknown;
         useDefault?: unknown;
+        pinned?: unknown;
+        folderId?: unknown;
       };
       const id = typeof body.id === "string" ? body.id.trim().slice(0, 100) : "";
       if (!id) return json({ error: "Choose a chat first." }, 400);
       const action =
         body.action === "archive" ||
         body.action === "restore" ||
-        body.action === "model"
+        body.action === "model" ||
+        body.action === "pin" ||
+        body.action === "move"
           ? body.action
           : "rename";
       let result;
@@ -271,6 +374,31 @@ export async function handleConversationApi(
             .bind(id)
             .run();
         }
+      } else if (action === "pin") {
+        result = await env.DB
+          .prepare(
+            `UPDATE conversations
+             SET pinned_at = CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END
+             WHERE id = ?`,
+          )
+          .bind(body.pinned === true ? 1 : 0, id)
+          .run();
+      } else if (action === "move") {
+        const folderId =
+          typeof body.folderId === "string" && body.folderId.trim()
+            ? body.folderId.trim().slice(0, 100)
+            : null;
+        if (folderId) {
+          const folder = await env.DB
+            .prepare("SELECT id FROM folders WHERE id = ?")
+            .bind(folderId)
+            .first<{ id: string }>();
+          if (!folder) return json({ error: "That folder could not be found." }, 404);
+        }
+        result = await env.DB
+          .prepare("UPDATE conversations SET folder_id = ? WHERE id = ?")
+          .bind(folderId, id)
+          .run();
       } else if (action === "archive") {
         result = await env.DB
           .prepare(

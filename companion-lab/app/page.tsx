@@ -99,11 +99,19 @@ type Conversation = {
   kind: "solo" | "group";
   title: string;
   archivedAt: string | null;
+  folderId?: string | null;
+  pinnedAt?: string | null;
   preview: string;
   messageCount: number;
   members: ConversationMember[];
   createdAt: string;
   updatedAt: string;
+};
+
+type ChatFolder = {
+  id: string;
+  name: string;
+  position: number;
 };
 type PendingConversationAction = {
   action: "archive" | "delete";
@@ -548,6 +556,10 @@ export default function Home() {
   const [draft, setDraft] = useState("");
   const [messages, setMessages] = useState(initialMessages);
   const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [folders, setFolders] = useState<ChatFolder[]>([]);
+  const [menuConversationId, setMenuConversationId] = useState<string | null>(null);
+  const [movePickerConversationId, setMovePickerConversationId] = useState<string | null>(null);
+  const [newFolderDraft, setNewFolderDraft] = useState("");
   const [activeConversationId, setActiveConversationId] = useState("kian-main");
   useEffect(() => {
     activeConversationIdRef.current = activeConversationId;
@@ -826,6 +838,41 @@ export default function Home() {
     () => conversations.filter((conversation) => Boolean(conversation.archivedAt)).length,
     [conversations],
   );
+  // Sidebar structure: pinned chats first, then custom folders, then one
+  // automatic group per companion plus Groups — so a chat always has a home
+  // without any filing effort, and folders are opt-in on top.
+  const sidebarSections = useMemo(() => {
+    const list = visibleConversations;
+    if (conversationFilter === "archived") return null;
+    const pinned = list.filter((conversation) => conversation.pinnedAt);
+    const rest = list.filter((conversation) => !conversation.pinnedAt);
+    const folderIds = new Set(folders.map((folder) => folder.id));
+    const filed = (conversation: Conversation) =>
+      Boolean(conversation.folderId && folderIds.has(conversation.folderId));
+    const folderSections = folders.map((folder) => ({
+      folder,
+      items: rest.filter((conversation) => conversation.folderId === folder.id),
+    }));
+    const unfiled = rest.filter((conversation) => !filed(conversation));
+    const companionSections = companions
+      .map((item) => ({
+        companion: item,
+        items: unfiled.filter(
+          (conversation) =>
+            conversation.kind === "solo" &&
+            (conversation.members[0]?.id || conversation.companionId) === item.id,
+        ),
+      }))
+      .filter((section) => section.items.length);
+    const knownCompanionIds = new Set(companions.map((item) => item.id));
+    const groupItems = unfiled.filter((conversation) => conversation.kind === "group");
+    const otherItems = unfiled.filter(
+      (conversation) =>
+        conversation.kind === "solo" &&
+        !knownCompanionIds.has(conversation.members[0]?.id || conversation.companionId),
+    );
+    return { pinned, folderSections, companionSections, groupItems, otherItems };
+  }, [visibleConversations, folders, companions, conversationFilter]);
 
   useEffect(() => {
     const textarea = composerTextareaRef.current;
@@ -1131,8 +1178,115 @@ export default function Home() {
   async function refreshConversations() {
     const response = await fetch("/api/conversations");
     if (!response.ok) throw new Error("Conversation history could not be loaded.");
-    const data = (await response.json()) as { conversations?: Conversation[] };
+    const data = (await response.json()) as {
+      conversations?: Conversation[];
+      folders?: ChatFolder[];
+    };
     setConversations(data.conversations || []);
+    if (data.folders) setFolders(data.folders);
+  }
+
+  function applyConversationUpdate(updated: Conversation) {
+    setConversations((current) =>
+      current.map((item) => (item.id === updated.id ? updated : item)),
+    );
+  }
+
+  async function patchConversation(body: Record<string, unknown>) {
+    const response = await fetch("/api/conversations", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = (await response.json()) as {
+      conversation?: Conversation;
+      error?: string;
+    };
+    if (!response.ok || !data.conversation) {
+      throw new Error(data.error || "The chat could not be updated.");
+    }
+    applyConversationUpdate(data.conversation);
+    return data.conversation;
+  }
+
+  async function setConversationPinned(conversation: Conversation) {
+    setMenuConversationId(null);
+    try {
+      await patchConversation({
+        id: conversation.id,
+        action: "pin",
+        pinned: !conversation.pinnedAt,
+      });
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "The pin could not be updated.");
+    }
+  }
+
+  async function moveConversationToFolder(
+    conversation: Conversation,
+    folderId: string | null,
+  ) {
+    setMenuConversationId(null);
+    setMovePickerConversationId(null);
+    try {
+      const updated = await patchConversation({
+        id: conversation.id,
+        action: "move",
+        folderId,
+      });
+      const folderName = folders.find((folder) => folder.id === folderId)?.name;
+      setNotice(
+        folderId && folderName
+          ? `${updated.title} moved to ${folderName}.`
+          : `${updated.title} returned to its companion group.`,
+      );
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "The chat could not be moved.");
+    }
+  }
+
+  async function createFolderAndMove(conversation: Conversation) {
+    const name = newFolderDraft.trim();
+    if (!name) return;
+    try {
+      const response = await fetch("/api/folders", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      const data = (await response.json()) as { folder?: ChatFolder; error?: string };
+      if (!response.ok || !data.folder) {
+        throw new Error(data.error || "The folder could not be created.");
+      }
+      setFolders((current) =>
+        current.some((folder) => folder.id === data.folder?.id)
+          ? current
+          : [...current, data.folder as ChatFolder],
+      );
+      setNewFolderDraft("");
+      await moveConversationToFolder(conversation, data.folder.id);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "The folder could not be created.");
+    }
+  }
+
+  async function deleteFolder(folder: ChatFolder) {
+    try {
+      const response = await fetch(`/api/folders?id=${encodeURIComponent(folder.id)}`, {
+        method: "DELETE",
+      });
+      const data = (await response.json()) as { error?: string };
+      if (!response.ok) throw new Error(data.error || "The folder could not be removed.");
+      setFolders((current) => current.filter((item) => item.id !== folder.id));
+      setConversations((current) =>
+        current.map((item) =>
+          item.folderId === folder.id ? { ...item, folderId: null } : item,
+        ),
+      );
+      setNotice(`${folder.name} removed — its chats went back to their companion groups.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "The folder could not be removed.");
+    }
   }
 
   async function setConversationModel(value: string) {
@@ -3751,6 +3905,178 @@ export default function Home() {
       ? mentionedMemberIds(draft, activeConversation.members)
       : [];
 
+  const renderChatRow = (conversation: Conversation) => (
+    <div
+      className="chat-row"
+      data-active={conversation.id === activeConversationId || undefined}
+      data-menu-open={menuConversationId === conversation.id || undefined}
+      key={conversation.id}
+    >
+      {renamingConversationId === conversation.id ? (
+        <form
+          className="rename-chat-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void renameConversation();
+          }}
+        >
+          <input
+            autoFocus
+            value={renameDraft}
+            onChange={(event) => setRenameDraft(event.target.value)}
+            aria-label="Chat name"
+          />
+          <button type="submit" aria-label="Save chat name">✓</button>
+          <button
+            type="button"
+            aria-label="Cancel rename"
+            onClick={() => setRenamingConversationId(null)}
+          >
+            ×
+          </button>
+        </form>
+      ) : (
+        <>
+          <button
+            className="chat-row-main"
+            onClick={() => void selectConversation(conversation.id)}
+            disabled={loadingConversation}
+          >
+            <span
+              className="avatar small"
+              data-group={conversation.kind === "group" || undefined}
+              style={
+                {
+                  "--avatar-color":
+                    conversation.members[0]?.accent || companion.accent,
+                } as React.CSSProperties
+              }
+            >
+              {conversation.kind === "group"
+                ? conversation.members.length
+                : (conversation.members[0]?.name || companion.name)
+                    .slice(0, 1)
+                    .toUpperCase()}
+            </span>
+            <span className="chat-copy">
+              <strong>
+                {conversation.pinnedAt ? "📌 " : ""}
+                {conversation.title}
+              </strong>
+              <small>
+                <b>{conversation.kind === "group" ? "Group" : conversation.members[0]?.name}</b>
+                {" · "}
+                {conversation.preview ||
+                  (conversation.messageCount
+                    ? `${conversation.messageCount} messages`
+                    : "Clean thread")}
+              </small>
+            </span>
+            {conversation.id === activeConversationId && (
+              <span className="status-dot" aria-label="Current conversation" />
+            )}
+          </button>
+          <button
+            className="chat-row-more"
+            aria-label={`Options for ${conversation.title}`}
+            aria-expanded={menuConversationId === conversation.id}
+            onClick={() => {
+              setMovePickerConversationId(null);
+              setMenuConversationId(
+                menuConversationId === conversation.id ? null : conversation.id,
+              );
+            }}
+          >
+            ⋯
+          </button>
+          {menuConversationId === conversation.id && (
+            <div className="chat-row-menu" role="menu">
+              {movePickerConversationId === conversation.id ? (
+                <>
+                  <p className="chat-row-menu-title">Move to…</p>
+                  {folders.map((folder) => (
+                    <button
+                      key={folder.id}
+                      role="menuitem"
+                      disabled={conversation.folderId === folder.id}
+                      onClick={() => void moveConversationToFolder(conversation, folder.id)}
+                    >
+                      📁 {folder.name}
+                    </button>
+                  ))}
+                  {conversation.folderId && (
+                    <button
+                      role="menuitem"
+                      onClick={() => void moveConversationToFolder(conversation, null)}
+                    >
+                      ↩ Back to companion group
+                    </button>
+                  )}
+                  <form
+                    className="chat-row-menu-newfolder"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      void createFolderAndMove(conversation);
+                    }}
+                  >
+                    <input
+                      value={newFolderDraft}
+                      onChange={(event) => setNewFolderDraft(event.target.value)}
+                      placeholder="New folder name"
+                      aria-label="New folder name"
+                    />
+                    <button type="submit" disabled={!newFolderDraft.trim()}>Add</button>
+                  </form>
+                </>
+              ) : (
+                <>
+                  <button role="menuitem" onClick={() => void setConversationPinned(conversation)}>
+                    {conversation.pinnedAt ? "Unpin" : "Pin to top"}
+                  </button>
+                  <button
+                    role="menuitem"
+                    onClick={() => {
+                      setMenuConversationId(null);
+                      setRenamingConversationId(conversation.id);
+                      setRenameDraft(conversation.title);
+                    }}
+                  >
+                    Rename
+                  </button>
+                  <button
+                    role="menuitem"
+                    onClick={() => setMovePickerConversationId(conversation.id)}
+                  >
+                    Move to folder…
+                  </button>
+                  <button
+                    role="menuitem"
+                    onClick={() => {
+                      setMenuConversationId(null);
+                      void setConversationArchived(conversation);
+                    }}
+                  >
+                    {conversation.archivedAt ? "Restore" : "Archive"}
+                  </button>
+                  <button
+                    role="menuitem"
+                    className="chat-row-menu-danger"
+                    onClick={() => {
+                      setMenuConversationId(null);
+                      void deleteConversation(conversation);
+                    }}
+                  >
+                    Delete…
+                  </button>
+                </>
+              )}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+
   return (
     <main
       className="app-shell"
@@ -3784,6 +4110,17 @@ export default function Home() {
           <Icon><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg></Icon>
           {creatingConversation ? "Opening…" : "New chat"}
         </button>
+
+        <div className="sidebar-quick-links">
+          <button onClick={() => openStudio("memory")}>
+            <span className="avatar small memory-nav-avatar">✦</span>
+            <span className="chat-copy"><strong>Memory</strong><small>What they remember</small></span>
+          </button>
+          <button onClick={() => openStudio("companions")}>
+            <span className="avatar small" style={{ "--avatar-color": "#43d6a2" } as React.CSSProperties}>+</span>
+            <span className="chat-copy"><strong>Companion Lab</strong><small>Identities &amp; roster</small></span>
+          </button>
+        </div>
 
         <button className="install-app" onClick={() => void installApp()}>
           <Icon><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5" /><path d="M5 19h14" /></svg></Icon>
@@ -3848,109 +4185,53 @@ export default function Home() {
             </span>
           </button>
           <nav className="conversation-list" aria-label="Conversations">
-            {visibleConversations.map((conversation) => (
-              <div
-                className="chat-row"
-                data-active={conversation.id === activeConversationId || undefined}
-                key={conversation.id}
-              >
-                {renamingConversationId === conversation.id ? (
-                  <form
-                    className="rename-chat-form"
-                    onSubmit={(event) => {
-                      event.preventDefault();
-                      void renameConversation();
-                    }}
-                  >
-                    <input
-                      autoFocus
-                      value={renameDraft}
-                      onChange={(event) => setRenameDraft(event.target.value)}
-                      aria-label="Chat name"
-                    />
-                    <button type="submit" aria-label="Save chat name">✓</button>
-                    <button
-                      type="button"
-                      aria-label="Cancel rename"
-                      onClick={() => setRenamingConversationId(null)}
-                    >
-                      ×
-                    </button>
-                  </form>
-                ) : (
-                  <>
-                    <button
-                      className="chat-row-main"
-                      onClick={() => void selectConversation(conversation.id)}
-                      disabled={loadingConversation}
-                    >
-                      <span
-                        className="avatar small"
-                        data-group={conversation.kind === "group" || undefined}
-                        style={
-                          {
-                            "--avatar-color":
-                              conversation.members[0]?.accent || companion.accent,
-                          } as React.CSSProperties
-                        }
-                      >
-                        {conversation.kind === "group"
-                          ? conversation.members.length
-                          : (conversation.members[0]?.name || companion.name)
-                              .slice(0, 1)
-                              .toUpperCase()}
-                      </span>
-                      <span className="chat-copy">
-                        <strong>{conversation.title}</strong>
-                        <small>
-                          <b>{conversation.kind === "group" ? "Group" : conversation.members[0]?.name}</b>
-                          {" · "}
-                          {conversation.preview ||
-                            (conversation.messageCount
-                              ? `${conversation.messageCount} messages`
-                              : "Clean thread")}
-                        </small>
-                      </span>
-                      {conversation.id === activeConversationId && (
-                        <span className="status-dot" aria-label="Current conversation" />
-                      )}
-                    </button>
-                    <button
-                      className="rename-chat"
-                      aria-label={`Rename ${conversation.title}`}
-                      onClick={() => {
-                        setRenamingConversationId(conversation.id);
-                        setRenameDraft(conversation.title);
-                      }}
-                    >
-                      ✎
-                    </button>
-                    <button
-                      className={`conversation-action archive-chat${
-                        conversation.archivedAt ? " restore-chat" : ""
-                      }`}
-                      aria-label={
-                        conversation.archivedAt
-                          ? `Restore ${conversation.title}`
-                          : `Archive ${conversation.title}`
-                      }
-                      title={conversation.archivedAt ? "Restore chat" : "Archive chat"}
-                      onClick={() => void setConversationArchived(conversation)}
-                    >
-                      {conversation.archivedAt ? "Restore" : "⌄"}
-                    </button>
-                    <button
-                      className="conversation-action delete-chat"
-                      aria-label={`Delete ${conversation.title}`}
-                      title="Delete chat"
-                      onClick={() => void deleteConversation(conversation)}
-                    >
-                      ×
-                    </button>
-                  </>
+            {sidebarSections ? (
+              <>
+                {sidebarSections.pinned.length > 0 && (
+                  <section className="chat-section">
+                    <p className="chat-section-label">📌 Pinned</p>
+                    {sidebarSections.pinned.map(renderChatRow)}
+                  </section>
                 )}
-              </div>
-            ))}
+                {sidebarSections.folderSections.map(({ folder, items }) => (
+                  <section className="chat-section" key={folder.id}>
+                    <p className="chat-section-label">
+                      <span>📁 {folder.name}</span>
+                      <button
+                        className="chat-section-remove"
+                        aria-label={`Remove folder ${folder.name}`}
+                        title="Remove folder (chats go back to their groups)"
+                        onClick={() => void deleteFolder(folder)}
+                      >
+                        ×
+                      </button>
+                    </p>
+                    {items.length ? (
+                      items.map(renderChatRow)
+                    ) : (
+                      <p className="chat-section-empty">
+                        Empty — move chats here from their ⋯ menu.
+                      </p>
+                    )}
+                  </section>
+                ))}
+                {sidebarSections.companionSections.map(({ companion: member, items }) => (
+                  <section className="chat-section" key={member.id}>
+                    <p className="chat-section-label">{member.name}</p>
+                    {items.map(renderChatRow)}
+                  </section>
+                ))}
+                {sidebarSections.groupItems.length > 0 && (
+                  <section className="chat-section">
+                    <p className="chat-section-label">Groups</p>
+                    {sidebarSections.groupItems.map(renderChatRow)}
+                  </section>
+                )}
+                {sidebarSections.otherItems.map(renderChatRow)}
+              </>
+            ) : (
+              visibleConversations.map(renderChatRow)
+            )}
             {!visibleConversations.length && (
               <p className="conversation-empty">
                 {conversationSearch
@@ -3960,14 +4241,6 @@ export default function Home() {
                     : "No conversations yet."}
               </p>
             )}
-            <button className="chat-row studio-row" onClick={() => openStudio("companions")}>
-              <span className="avatar small" style={{ "--avatar-color": "#43d6a2" } as React.CSSProperties}>+</span>
-              <span className="chat-copy"><strong>Companion Lab</strong><small>Build distinct identities</small></span>
-            </button>
-            <button className="chat-row studio-row" onClick={() => openStudio("memory")}>
-              <span className="avatar small memory-nav-avatar">✦</span>
-              <span className="chat-copy"><strong>Memory</strong><small>Inspect shared and private continuity</small></span>
-            </button>
           </nav>
         </div>
 
@@ -4712,7 +4985,7 @@ export default function Home() {
             <nav className="studio-tabs" aria-label={studioSurface === "lab" ? "Companion Lab" : "Settings"}>
               {(studioSurface === "lab"
                 ? (["companions", "identity"] as StudioTab[])
-                : (["provider", "budget", "connectors", "voice", "archive"] as StudioTab[])
+                : (["provider", "voice", "connectors", "budget", "archive"] as StudioTab[])
               ).map((tab) => (
                 <button key={tab} data-active={studioTab === tab || undefined} onClick={() => setStudioTab(tab)}>
                   {tab === "companions"
@@ -4720,13 +4993,13 @@ export default function Home() {
                     : tab === "identity"
                       ? "Identity"
                       : tab === "provider"
-                        ? "Provider"
+                        ? "Keys & models"
                         : tab === "budget"
                           ? "Spending"
                           : tab === "connectors"
-                            ? "Connectors"
+                            ? "Tools"
                             : tab === "archive"
-                              ? "Archive"
+                              ? "Archived chats"
                           : tab === "voice"
                             ? "Voice"
                             : "Memory"}

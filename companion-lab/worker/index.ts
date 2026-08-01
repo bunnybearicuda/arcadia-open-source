@@ -3,7 +3,7 @@ import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } fr
 import handler from "vinext/server/app-router-entry";
 import { handleCompanionApi } from "../lib/companion-api";
 import { handleChatApi } from "../lib/chat-api";
-import { handleConversationApi } from "../lib/conversation-api";
+import { handleConversationApi, handleFolderApi } from "../lib/conversation-api";
 import { handleMemoryApi } from "../lib/memory-api";
 import { handleModelApi } from "../lib/model-api";
 import { handleNotionApi } from "../lib/notion-api";
@@ -63,6 +63,10 @@ const worker = {
 
     if (url.pathname === "/api/conversations") {
       return handleConversationApi(request, env);
+    }
+
+    if (url.pathname === "/api/folders") {
+      return handleFolderApi(request, env);
     }
 
     if (url.pathname === "/api/memory") {
