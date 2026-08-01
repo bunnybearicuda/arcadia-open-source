@@ -45,16 +45,34 @@ as $$
   -- guaranteed slots, and the rest of the budget is ranked by relevance to
   -- the query, so pinned rules can never crowd out the memories the current
   -- conversation actually needs.
-  with ranked as (
+  --
+  -- The query text is capped before ranking: trigram similarity against a
+  -- multi-thousand-character conversation excerpt is what previously made
+  -- this function exceed the statement timeout on a few hundred rows.
+  with parsed as (
+    select
+      nullif(trim(left(p_query, 2000)), '') as text_query,
+      lower(nullif(trim(right(p_query, 400)), '')) as fuzzy_query
+  ),
+  prepared as (
+    select
+      fuzzy_query,
+      case
+        when text_query is null then null
+        else websearch_to_tsquery('english', text_query)
+      end as ts_query
+    from parsed
+  ),
+  ranked as (
     select m.*,
       case
-        when nullif(trim(p_query), '') is null then 0
+        when p.ts_query is null then 0
         else greatest(
-          ts_rank_cd(m.search_vector, websearch_to_tsquery('english', p_query)) * 3,
-          similarity(lower(m.content), lower(p_query))
+          ts_rank_cd(m.search_vector, p.ts_query) * 3,
+          coalesce(similarity(lower(m.content), p.fuzzy_query), 0)
         )
       end as relevance
-    from public.memories m
+    from public.memories m, prepared p
     where m.active = true
       and m.owner_id in (p_companion_id, 'shared')
   ),

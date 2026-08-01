@@ -2318,6 +2318,9 @@ export async function handleChatApi(
               .all<GroupMember>()
           ).results || []
         : [];
+    // Most recent context matters most, and an unbounded query makes the
+    // Supabase similarity ranking blow past its statement timeout — keep
+    // the tail of the room context, capped.
     const memoryQuery = [
       ...history
         .slice(-16)
@@ -2326,7 +2329,8 @@ export async function handleChatApi(
       ...attachments.map((attachment) => attachment.filename),
     ]
       .filter(Boolean)
-      .join(" ");
+      .join(" ")
+      .slice(-2_000);
     const remoteMemoryConfig = supabaseMemoryConfig(request, env);
     const webSearchEnabled =
       request.headers.get("x-companion-web-search") === "enabled";
