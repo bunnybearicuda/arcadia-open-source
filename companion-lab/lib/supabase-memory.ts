@@ -120,7 +120,10 @@ export async function searchSupabaseMemories(
     method: "POST",
     body: JSON.stringify({
       p_companion_id: companionId,
-      p_query: query.slice(0, 20_000),
+      // Keep the tail: the newest turns are the retrieval signal, and
+      // truncating from the front used to drop the user's latest message
+      // from the search entirely in long threads.
+      p_query: query.slice(-20_000),
       p_limit: Math.min(100, Math.max(1, limit)),
     }),
   });
