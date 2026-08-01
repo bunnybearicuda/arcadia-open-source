@@ -1,5 +1,6 @@
 import type { CompanionApiEnv } from "./companion-api";
-import { initializeChatStorage } from "./chat-api";
+import { handleChatApi, initializeChatStorage } from "./chat-api";
+import { sendPushToAll } from "./push-api";
 import {
   DEFAULT_WINDOWS,
   insideWindow,
@@ -245,14 +246,80 @@ export async function handleCheckInApi(
     }
     const due = await findDueConversation(env.DB, settings, now);
     if (!due) return json({ skipped: "nobody is due" });
-    // Message generation and delivery land in the next pass; the scheduler can
-    // already be pointed here to confirm the timing rules behave.
+
+    // The companion writes the message itself through the normal chat path, so
+    // it carries the same identity, memory, and history as any other reply.
+    const origin = new URL(request.url).origin;
+    const generated = await handleChatApi(
+      new Request(`${origin}/api/chat?conversationId=${encodeURIComponent(due.conversation_id)}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          conversationId: due.conversation_id,
+          companionId: due.companion_id,
+          content: "",
+          continueConversation: true,
+          checkIn: true,
+        }),
+      }),
+      env,
+    );
+    if (!generated.ok) {
+      const failure = (await generated.json()) as { error?: string };
+      return json(
+        { error: failure.error || `${due.name} could not write a check-in.` },
+        502,
+      );
+    }
+    // Drain the stream so generation completes before the message is marked.
+    let assistantId = "";
+    let text = "";
+    if (generated.body) {
+      const reader = generated.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { value, done } = await reader.read();
+        buffer += decoder.decode(value, { stream: !done });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const event = JSON.parse(line) as Record<string, unknown>;
+            if (event.type === "delta" && typeof event.text === "string") text += event.text;
+            if (event.type === "done" && typeof event.messageId === "string") {
+              assistantId = event.messageId;
+            }
+          } catch {
+            // Ignore partial frames.
+          }
+        }
+        if (done) break;
+      }
+    }
+    if (!assistantId) {
+      return json({ error: `${due.name} did not finish a check-in.` }, 502);
+    }
+    await env.DB
+      .prepare("UPDATE messages SET is_check_in = 1 WHERE id = ?")
+      .bind(assistantId)
+      .run();
+
+    const preview = text.replace(/\s+/g, " ").trim().slice(0, 140);
+    const delivery = await sendPushToAll(env.DB, {
+      title: due.name,
+      body: preview || `${due.name} reached out.`,
+      tag: `check-in-${due.conversation_id}`,
+      url: "/",
+    });
 
     return json({
-      due: {
+      sent: {
         conversationId: due.conversation_id,
         companion: due.name,
-        lastAt: due.last_at,
+        messageId: assistantId,
+        notified: delivery.sent,
       },
     });
   } catch (error) {

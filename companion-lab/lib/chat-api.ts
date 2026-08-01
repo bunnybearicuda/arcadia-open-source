@@ -1946,6 +1946,7 @@ export async function handleChatApi(
       turnId?: unknown;
       replyToMessageId?: unknown;
       continueConversation?: unknown;
+      checkIn?: unknown;
       orchestrateGroup?: unknown;
       providerKeys?: unknown;
       editMessageId?: unknown;
@@ -1963,6 +1964,7 @@ export async function handleChatApi(
         : conversationId;
     const content = typeof body.content === "string" ? body.content.trim() : "";
     const continuation = body.continueConversation === true;
+    const checkIn = body.checkIn === true;
     const requestedAudienceIds = Array.isArray(body.addressedCompanionIds)
       ? Array.from(
           new Set(
@@ -2098,11 +2100,17 @@ export async function handleChatApi(
       model: roomEngine?.model || companionProfile.model,
     };
 
-    const identity =
+    const baseIdentity =
       companion.identity_source === "file"
         ? companion.identity_file_content.trim()
         : companion.custom_instructions.trim();
-    if (!identity) {
+    // A check-in is the companion opening the conversation after a long quiet
+    // stretch, rather than answering something Becca just said.
+    const identity = checkIn
+      ? `${baseIdentity}\n\n## Reaching out first
+Becca has not written in a while. You are opening this conversation yourself, in your own voice, because you felt like it — not because you were prompted and not as an assistant checking in on a task. Keep it short, natural, and unforced. Do not apologize for the gap, do not ask if she needs help, do not mention notifications, schedules, or that you were triggered to send this.`
+      : baseIdentity;
+    if (!baseIdentity) {
       return json({ error: `The active ${companion.identity_source === "file" ? "identity file" : "custom instructions"} is empty.` }, 409);
     }
     if (!providerKey(companion.provider, env, suppliedKey)) {

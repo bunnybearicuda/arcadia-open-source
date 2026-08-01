@@ -1,0 +1,33 @@
+name: Companion check-in
+
+# Companion Lab has no built-in scheduler, so this pokes the app once an hour.
+# The app itself decides whether anyone is actually due, so a firing that lands
+# outside a waking window simply does nothing.
+on:
+  schedule:
+    - cron: "5 * * * *"
+  workflow_dispatch:
+
+jobs:
+  poke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ask the app whether a companion should reach out
+        env:
+          APP_URL: ${{ secrets.COMPANION_LAB_URL }}
+          CHECK_IN_SECRET: ${{ secrets.CHECK_IN_SECRET }}
+        run: |
+          if [ -z "$APP_URL" ] || [ -z "$CHECK_IN_SECRET" ]; then
+            echo "Set the COMPANION_LAB_URL and CHECK_IN_SECRET repository secrets first."
+            exit 1
+          fi
+          response=$(curl -sS -X POST "$APP_URL/api/check-ins" \
+            -H "x-companion-check-in-secret: $CHECK_IN_SECRET" \
+            -w "\n%{http_code}")
+          body=$(echo "$response" | head -n -1)
+          status=$(echo "$response" | tail -n 1)
+          echo "$body"
+          # A skip is a normal outcome; only a real failure should fail the run.
+          if [ "$status" -ge 500 ]; then
+            exit 1
+          fi
