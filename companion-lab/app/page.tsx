@@ -302,6 +302,7 @@ const DEVICE_KEYS_STORAGE = "companion-lab.provider-keys.v1";
 const NOTION_KEY_STORAGE = "companion-lab.notion-key.v1";
 const SUPABASE_MEMORY_STORAGE = "companion-lab.supabase-memory.v1";
 const PROVIDER_FUNDS_STORAGE = "companion-lab.provider-funds.v1";
+const ADMIN_KEYS_STORAGE = "companion-lab.admin-keys.v1";
 const OPENROUTER_MANAGEMENT_KEY_STORAGE =
   "companion-lab.openrouter-management-key.v1";
 const ELEVENLABS_KEY_STORAGE = "companion-lab.elevenlabs-key.v1";
@@ -670,6 +671,12 @@ export default function Home() {
   });
   const [editingMonthlyBudget, setEditingMonthlyBudget] = useState(5);
   const [providerFunds, setProviderFunds] = useState<ProviderFunds>({});
+  const [adminKeys, setAdminKeys] = useState<DeviceKeys>({});
+  const [adminKeyDrafts, setAdminKeyDrafts] = useState<DeviceKeys>({});
+  const [providerSpend, setProviderSpend] = useState<
+    Partial<Record<Companion["provider"], { spend: number; since: string }>>
+  >({});
+  const [providerSpendErrors, setProviderSpendErrors] = useState<DeviceKeys>({});
   const [providerFundDrafts, setProviderFundDrafts] = useState<
     Partial<Record<Companion["provider"], string>>
   >({});
@@ -1126,8 +1133,23 @@ export default function Home() {
   useEffect(() => {
     void Promise.resolve().then(() => {
       if (window.localStorage.getItem(VOICE_MODE_STORAGE) === "on") setVoiceMode(true);
+      try {
+        const saved = window.localStorage.getItem(ADMIN_KEYS_STORAGE);
+        if (saved) setAdminKeys(JSON.parse(saved) as DeviceKeys);
+      } catch {
+        window.localStorage.removeItem(ADMIN_KEYS_STORAGE);
+      }
     });
   }, []);
+
+  // Pull real charged spend whenever the Spending tab is open.
+  useEffect(() => {
+    if (studioTab !== "budget") return;
+    for (const provider of ["anthropic", "openai"] as Companion["provider"][]) {
+      if (adminKeys[provider]) void refreshProviderSpend(provider);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [studioTab, adminKeys.anthropic, adminKeys.openai]);
 
   // Voice mode (PDF Phase 6): read each completed reply aloud as it lands,
   // one at a time, skipping anything already on screen when it was switched on.
@@ -1564,10 +1586,89 @@ export default function Home() {
     return usage.lifetimeByProvider.find((item) => item.provider === provider)?.cost || 0;
   }
 
+  // Spend since the balance was anchored. Uses the provider's own charged
+  // figure when an admin key is connected, and this app's estimate otherwise.
+  function spentSinceAnchor(provider: Companion["provider"]) {
+    const anchor = providerFunds[provider];
+    if (!anchor) return { amount: 0, reported: false };
+    const reported = providerSpend[provider];
+    if (reported && Date.parse(reported.since) <= Date.parse(anchor.savedAt)) {
+      return { amount: Math.max(0, reported.spend), reported: true };
+    }
+    return {
+      amount: Math.max(0, lifetimeProviderCost(provider) - anchor.trackedCost),
+      reported: false,
+    };
+  }
+
   function providerBalance(provider: Companion["provider"]) {
     const anchor = providerFunds[provider];
     if (!anchor) return null;
-    return Math.max(0, anchor.balance - Math.max(0, lifetimeProviderCost(provider) - anchor.trackedCost));
+    return Math.max(0, anchor.balance - spentSinceAnchor(provider).amount);
+  }
+
+  function saveAdminKey(provider: Companion["provider"]) {
+    const key = (adminKeyDrafts[provider] || "").trim();
+    if (key.length < 20) {
+      setNotice("That admin key looks incomplete.");
+      return;
+    }
+    const next = { ...adminKeys, [provider]: key };
+    window.localStorage.setItem(ADMIN_KEYS_STORAGE, JSON.stringify(next));
+    setAdminKeys(next);
+    setAdminKeyDrafts({ ...adminKeyDrafts, [provider]: "" });
+    void refreshProviderSpend(provider, next);
+  }
+
+  function removeAdminKey(provider: Companion["provider"]) {
+    const next = { ...adminKeys };
+    delete next[provider];
+    window.localStorage.setItem(ADMIN_KEYS_STORAGE, JSON.stringify(next));
+    setAdminKeys(next);
+    setProviderSpend((current) => {
+      const updated = { ...current };
+      delete updated[provider];
+      return updated;
+    });
+  }
+
+  async function refreshProviderSpend(
+    provider: Companion["provider"],
+    keys: DeviceKeys = adminKeys,
+  ) {
+    const adminKey = keys[provider];
+    if (!adminKey) return;
+    const anchor = providerFunds[provider];
+    const since = anchor?.savedAt;
+    try {
+      const response = await fetch(
+        `/api/provider-credits?provider=${provider}${since ? `&since=${encodeURIComponent(since)}` : ""}`,
+        { headers: { "x-companion-admin-key": adminKey } },
+      );
+      const data = (await response.json()) as {
+        spend?: number;
+        since?: string;
+        error?: string;
+      };
+      if (!response.ok || typeof data.spend !== "number") {
+        throw new Error(data.error || "The provider spend report could not be read.");
+      }
+      setProviderSpend((current) => ({
+        ...current,
+        [provider]: { spend: data.spend as number, since: data.since || since || "" },
+      }));
+      setProviderSpendErrors((current) => {
+        const next = { ...current };
+        delete next[provider];
+        return next;
+      });
+    } catch (error) {
+      setProviderSpendErrors((current) => ({
+        ...current,
+        [provider]:
+          error instanceof Error ? error.message : "Spend report unavailable.",
+      }));
+    }
   }
 
   function saveProviderFund(provider: Companion["provider"]) {
@@ -5482,7 +5583,7 @@ export default function Home() {
                 <div className="settings-section">
                   <div className="section-intro">
                     <h3>API spending</h3>
-                    <p>Every completed reply records tokens and cost. OpenRouter reports the charge directly; Anthropic and OpenAI are estimated from the model’s published token price.</p>
+                    <p>Every completed reply records tokens and cost. OpenRouter reports the charge directly; Anthropic and OpenAI are estimated from the model’s published token price unless you connect an admin key below, which replaces the estimate with what the provider actually billed.</p>
                   </div>
                   <div className="budget-hero usage-hero">
                     <span>Spent this month</span>
@@ -5543,6 +5644,7 @@ export default function Home() {
                               null
                             : null;
                         const remaining = liveRemaining ?? manualRemaining;
+                        const spentInfo = spentSinceAnchor(provider);
                         const trackingMode =
                           provider === "openrouter" &&
                           openRouterCredits?.account
@@ -5551,7 +5653,9 @@ export default function Home() {
                                 openRouterCredits?.key?.limitRemaining !== null &&
                                 openRouterCredits?.key?.limitRemaining !== undefined
                               ? "Live key limit"
-                              : "Local estimate";
+                              : spentInfo.reported
+                                ? "Real spend"
+                                : "Local estimate";
                         return (
                           <article key={provider}>
                             <div>
@@ -5662,7 +5766,82 @@ export default function Home() {
                       )}
                       <p>The management key stays in this device’s private storage and travels over HTTPS only for credit checks. OpenRouter does not allow management keys to run chat completions.</p>
                     </div>
-                    <small>OpenAI and Anthropic do not expose remaining prepaid credit to ordinary chat keys. Their cards are labeled local estimates and subtract completed Companion Lab activity from the starting balance you enter.</small>
+                    {(["anthropic", "openai"] as Companion["provider"][]).map((provider) => {
+                      const reported = providerSpend[provider];
+                      return (
+                        <div className="secret-card provider-credit-key-card" key={provider}>
+                          <div>
+                            <span className="secret-icon">$</span>
+                            <span>
+                              <strong>{providerInfo[provider].name} real charged spend</strong>
+                              <small>
+                                {reported
+                                  ? `Provider-reported · $${reported.spend.toFixed(4)} charged since ${new Date(reported.since).toLocaleDateString()}`
+                                  : adminKeys[provider]
+                                    ? "Admin key saved · waiting for a successful read"
+                                    : "Add an admin key to replace this app’s estimate with what you were actually billed"}
+                              </small>
+                            </span>
+                          </div>
+                          <div className="key-entry">
+                            <input
+                              type="password"
+                              value={adminKeyDrafts[provider] || ""}
+                              autoComplete="off"
+                              spellCheck={false}
+                              onChange={(event) =>
+                                setAdminKeyDrafts({
+                                  ...adminKeyDrafts,
+                                  [provider]: event.target.value,
+                                })
+                              }
+                              placeholder={
+                                adminKeys[provider]
+                                  ? "Enter a replacement admin key"
+                                  : provider === "anthropic"
+                                    ? "Paste Anthropic admin key (sk-ant-admin…)"
+                                    : "Paste OpenAI admin key (sk-admin…)"
+                              }
+                              aria-label={`${providerInfo[provider].name} admin key`}
+                            />
+                            <button
+                              type="button"
+                              className="save-key"
+                              onClick={() => saveAdminKey(provider)}
+                              disabled={!(adminKeyDrafts[provider] || "").trim()}
+                            >
+                              Save on device
+                            </button>
+                          </div>
+                          {adminKeys[provider] && (
+                            <button
+                              type="button"
+                              className="remove-key"
+                              onClick={() => removeAdminKey(provider)}
+                            >
+                              Remove admin key from this device
+                            </button>
+                          )}
+                          {providerSpendErrors[provider] && (
+                            <p className="provider-credit-error">
+                              {providerSpendErrors[provider]}
+                            </p>
+                          )}
+                          <p>
+                            {provider === "anthropic"
+                              ? "Create this in the Anthropic Console under Admin keys — it is separate from your chat key and only an organization owner can make one."
+                              : "Create this in the OpenAI platform settings under Admin keys — it is separate from your chat key."}{" "}
+                            It stays in this device’s private storage and is used only to read your spend.
+                          </p>
+                        </div>
+                      );
+                    })}
+                    <small>
+                      Anthropic and OpenAI publish what you were <b>charged</b>, but neither publishes a
+                      remaining prepaid balance — no app can show one. With an admin key connected, the
+                      amount spent is the provider’s own figure and the remaining number is your entered
+                      balance minus that real spend. Without one, both numbers are this app’s estimate.
+                    </small>
                   </section>
                   <section className="model-price-guide">
                     <div>

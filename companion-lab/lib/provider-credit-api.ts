@@ -90,16 +90,120 @@ async function fetchAccountCredits(key: string) {
   };
 }
 
+// Anthropic and OpenAI publish what an organization was actually charged, but
+// neither exposes a remaining balance. These read the real charged spend so the
+// app can stop presenting its own estimate as though it were the provider's
+// number. Both require an Admin key, which is separate from a chat key.
+async function fetchAnthropicSpend(adminKey: string, startingAt: string) {
+  const url = new URL("https://api.anthropic.com/v1/organizations/cost_report");
+  url.searchParams.set("starting_at", startingAt);
+  url.searchParams.set("bucket_width", "1d");
+  const response = await fetch(url, {
+    headers: {
+      "x-api-key": adminKey,
+      "anthropic-version": "2023-06-01",
+    },
+  });
+  if (!response.ok) throw new Error(await providerError(response));
+  const payload = (await response.json()) as {
+    data?: Array<{ results?: Array<{ amount?: unknown; currency?: unknown }> }>;
+  };
+  let total = 0;
+  for (const bucket of payload.data || []) {
+    for (const entry of bucket.results || []) {
+      // Amounts arrive as decimal strings in cents.
+      const amount = finiteNumber(entry.amount);
+      if (amount !== null) total += amount / 100;
+    }
+  }
+  return { spend: Math.max(0, total), since: startingAt };
+}
+
+async function fetchOpenAISpend(adminKey: string, startTimeSeconds: number) {
+  const url = new URL("https://api.openai.com/v1/organization/costs");
+  url.searchParams.set("start_time", String(startTimeSeconds));
+  url.searchParams.set("bucket_width", "1d");
+  url.searchParams.set("limit", "180");
+  const response = await fetch(url, {
+    headers: { authorization: `Bearer ${adminKey}` },
+  });
+  if (!response.ok) throw new Error(await providerError(response));
+  const payload = (await response.json()) as {
+    data?: Array<{
+      results?: Array<{ amount?: { value?: unknown; currency?: unknown } }>;
+    }>;
+  };
+  let total = 0;
+  for (const bucket of payload.data || []) {
+    for (const entry of bucket.results || []) {
+      const amount = finiteNumber(entry.amount?.value);
+      if (amount !== null) total += amount;
+    }
+  }
+  return {
+    spend: Math.max(0, total),
+    since: new Date(startTimeSeconds * 1000).toISOString(),
+  };
+}
+
 export async function handleProviderCreditApi(
   request: Request,
   env: CompanionApiEnv,
 ): Promise<Response> {
   if (request.method !== "GET") return json({ error: "Method not allowed." }, 405);
 
-  const provider = new URL(request.url).searchParams.get("provider");
+  const url = new URL(request.url);
+  const provider = url.searchParams.get("provider");
+
+  if (provider === "anthropic" || provider === "openai") {
+    const adminKey = headerKey(request, "x-companion-admin-key");
+    if (!adminKey) {
+      return json(
+        {
+          error: `Add an ${provider === "anthropic" ? "Anthropic" : "OpenAI"} admin key to read real charged spend.`,
+        },
+        409,
+      );
+    }
+    // Default to the start of the current month, matching how both providers
+    // bill, unless the caller anchors an explicit start date.
+    const requestedSince = url.searchParams.get("since");
+    const monthStart = new Date();
+    monthStart.setUTCDate(1);
+    monthStart.setUTCHours(0, 0, 0, 0);
+    const since =
+      requestedSince && !Number.isNaN(Date.parse(requestedSince))
+        ? new Date(requestedSince)
+        : monthStart;
+    try {
+      const result =
+        provider === "anthropic"
+          ? await fetchAnthropicSpend(adminKey, since.toISOString())
+          : await fetchOpenAISpend(adminKey, Math.floor(since.getTime() / 1000));
+      return json({
+        provider,
+        fetchedAt: new Date().toISOString(),
+        spend: result.spend,
+        since: result.since,
+        // Neither provider publishes a remaining balance.
+        remaining: null,
+      });
+    } catch (error) {
+      return json(
+        {
+          error:
+            error instanceof Error
+              ? error.message
+              : "The provider spend report could not be read.",
+        },
+        502,
+      );
+    }
+  }
+
   if (provider !== "openrouter") {
     return json(
-      { error: "Live provider credit sync is currently available for OpenRouter." },
+      { error: "Live credit sync supports Anthropic, OpenAI, and OpenRouter." },
       400,
     );
   }
