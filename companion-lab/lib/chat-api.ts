@@ -20,6 +20,7 @@ import {
   providerToolTracker,
 } from "./group-routing";
 import { supabaseMemoryConfig } from "./supabase-memory";
+import { sendPushToAll } from "./push-api";
 import {
   callConnectorTool,
   connectorGatewayTool,
@@ -2486,6 +2487,7 @@ Becca has not written in a while. You are opening this conversation yourself, in
 
     const channelEvents: Array<Record<string, unknown>> = [];
     let channelClosed = false;
+    let clientGone = false;
     let wakeDrain: (() => void) | null = null;
     const send = (event: Record<string, unknown>) => {
       channelEvents.push(event);
@@ -2744,6 +2746,22 @@ Becca has not written in a while. You are opening this conversation yourself, in
         } catch {
           // Memory consolidation must never eat a completed chat reply.
         }
+        if (clientGone && !checkIn) {
+          // The app was closed before this landed, so without a notification
+          // the reply would sit unread with no sign it arrived.
+          try {
+            await sendPushToAll(env.DB, {
+              title: companion.name,
+              body:
+                assistantText.replace(/\s+/g, " ").trim().slice(0, 140) ||
+                `${companion.name} replied.`,
+              tag: `reply-${requestedConversation}`,
+              url: "/",
+            });
+          } catch {
+            // A failed notification must not affect the stored reply.
+          }
+        }
         send({
           type: "done",
           messageId: assistantId,
@@ -2797,6 +2815,7 @@ Becca has not written in a while. You are opening this conversation yourself, in
             });
           }
         } catch {
+          clientGone = true;
           // The client went away; the generation loop above keeps running.
         }
         try {
@@ -2804,6 +2823,10 @@ Becca has not written in a while. You are opening this conversation yourself, in
         } catch {
           // The stream was already cancelled with the connection.
         }
+      },
+      cancel() {
+        // The app was closed or backgrounded before the reply landed.
+        clientGone = true;
       },
     });
 
