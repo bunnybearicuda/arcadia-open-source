@@ -387,6 +387,36 @@ export async function initializeChatStorage(database: D1Database) {
   }
 }
 
+export type ChatExecutionContext = {
+  waitUntil(promise: Promise<unknown>): void;
+};
+
+// A reply row can be orphaned in 'streaming' state if the runtime evicts the
+// worker mid-generation. On the next read, finish rows that already carry
+// text and withdraw rows that never received any.
+async function reapStaleStreamingReplies(database: D1Database, conversationId: string) {
+  await database
+    .prepare(
+      `DELETE FROM messages
+       WHERE conversation_id = ?
+         AND status = 'streaming'
+         AND content_json = ?
+         AND created_at < datetime('now', '-10 minutes')`,
+    )
+    .bind(conversationId, blocks(""))
+    .run();
+  await database
+    .prepare(
+      `UPDATE messages
+       SET status = 'complete'
+       WHERE conversation_id = ?
+         AND status = 'streaming'
+         AND created_at < datetime('now', '-10 minutes')`,
+    )
+    .bind(conversationId)
+    .run();
+}
+
 async function storedMessages(database: D1Database, conversationId: string) {
   const result = await database
     .prepare(
@@ -1451,6 +1481,7 @@ async function handleGroupTurnApi(
     providerKeys?: unknown;
     turnId?: unknown;
   },
+  context?: ChatExecutionContext,
 ) {
   const conversationId =
     typeof body.conversationId === "string" && body.conversationId.trim()
@@ -1559,11 +1590,24 @@ async function handleGroupTurnApi(
     replyToSpeakerName: "Becca",
   }));
   const encoder = new TextEncoder();
-  const stream = new ReadableStream({
-    async start(controller) {
-      const send = (event: Record<string, unknown>) => {
-        controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
-      };
+  const channelEvents: Array<Record<string, unknown>> = [];
+  let channelClosed = false;
+  let wakeDrain: (() => void) | null = null;
+  const send = (event: Record<string, unknown>) => {
+    channelEvents.push(event);
+    wakeDrain?.();
+    wakeDrain = null;
+  };
+  const closeChannel = () => {
+    channelClosed = true;
+    wakeDrain?.();
+    wakeDrain = null;
+  };
+
+  // The whole multi-companion turn runs to completion regardless of whether
+  // the client connection survives; companions later in the queue are no
+  // longer cut off when the app closes mid-turn.
+  const orchestration = (async () => {
       let userMessageId = "";
       let userCommitted = false;
       let handoffsQueued = 0;
@@ -1666,7 +1710,7 @@ async function handleGroupTurnApi(
               }),
             },
           );
-          const response = await handleChatApi(subRequest, env);
+          const response = await handleChatApi(subRequest, env, context);
           if (!response.ok) {
             const failure = (await response.json()) as {
               error?: string;
@@ -1828,7 +1872,32 @@ async function handleGroupTurnApi(
               : "The group turn could not be completed.",
         });
       } finally {
+        closeChannel();
+      }
+  })();
+  context?.waitUntil(orchestration.catch(() => undefined));
+
+  const stream = new ReadableStream({
+    async start(controller) {
+      let index = 0;
+      try {
+        while (true) {
+          while (index < channelEvents.length) {
+            controller.enqueue(encoder.encode(`${JSON.stringify(channelEvents[index])}\n`));
+            index += 1;
+          }
+          if (channelClosed) break;
+          await new Promise<void>((resolve) => {
+            wakeDrain = resolve;
+          });
+        }
+      } catch {
+        // The client went away; the orchestration above keeps running.
+      }
+      try {
         controller.close();
+      } catch {
+        // The stream was already cancelled with the connection.
       }
     },
   });
@@ -1845,6 +1914,7 @@ async function handleGroupTurnApi(
 export async function handleChatApi(
   request: Request,
   env: CompanionApiEnv,
+  context?: ChatExecutionContext,
 ): Promise<Response> {
   try {
     await initializeChatStorage(env.DB);
@@ -1852,6 +1922,7 @@ export async function handleChatApi(
     const conversationId = url.searchParams.get("conversationId") || "kian-main";
 
     if (request.method === "GET") {
+      await reapStaleStreamingReplies(env.DB, conversationId);
       const messages = await storedMessages(env.DB, conversationId);
       return json({ conversationId, messages: messages.map(clientMessage) });
     }
@@ -1873,7 +1944,7 @@ export async function handleChatApi(
       retryMessageId?: unknown;
     };
     if (body.orchestrateGroup === true) {
-      return handleGroupTurnApi(request, env, body);
+      return handleGroupTurnApi(request, env, body, context);
     }
     const suppliedKey = (request.headers.get("x-companion-provider-key") || "")
       .trim()
@@ -2227,7 +2298,11 @@ export async function handleChatApi(
           : null;
     }
 
-    const history = await storedMessages(env.DB, requestedConversation);
+    // Replies still being generated by another request stay out of the
+    // provider prompt until they are complete.
+    const history = (await storedMessages(env.DB, requestedConversation)).filter(
+      (message) => message.status !== "streaming",
+    );
     const groupMembers =
       (conversation?.kind || "solo") === "group"
         ? (
@@ -2307,164 +2382,236 @@ export async function handleChatApi(
 
     const assistantId = crypto.randomUUID();
     const encoder = new TextEncoder();
+
+    // The reply is persisted immediately and finished by a generation loop
+    // that outlives this connection, so closing the app mid-stream can no
+    // longer lose the companion's reply or the memory work that follows it.
+    await env.DB
+      .prepare(
+        `INSERT INTO messages
+          (id, conversation_id, companion_id, speaker_id, speaker_name,
+           audience_json, reply_to_message_id, turn_id, role,
+           content_json, provider, model, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'assistant', ?, ?, ?, 'streaming')`,
+      )
+      .bind(
+        assistantId,
+        requestedConversation,
+        companion.id,
+        companion.id,
+        companion.name,
+        JSON.stringify([]),
+        assistantReplyToMessageId || null,
+        requestedTurnId,
+        blocks(""),
+        companion.provider,
+        companion.model,
+      )
+      .run();
+
+    const channelEvents: Array<Record<string, unknown>> = [];
+    let channelClosed = false;
+    let wakeDrain: (() => void) | null = null;
+    const send = (event: Record<string, unknown>) => {
+      channelEvents.push(event);
+      wakeDrain?.();
+      wakeDrain = null;
+    };
+    const closeChannel = () => {
+      channelClosed = true;
+      wakeDrain?.();
+      wakeDrain = null;
+    };
+
+    const generation = (async () => {
+      let assistantText = "";
+      const usage: Usage = {};
+      const toolTracker = providerToolTracker(
+        companion.provider,
+        new Set(groupMembers.map((member) => member.id).filter((id) => id !== companion.id)),
+      );
+      const citationTracker = providerCitationTracker(companion.provider);
+      const filterOpeningArtifact = openingArtifactFilter(companion.name);
+      const emitText = (text: string) => {
+        if (!text) return;
+        assistantText += text;
+        send({ type: "delta", text });
+      };
+      const costForUsage = () =>
+        usage.costUsd ??
+        estimateCost(
+          companion.provider,
+          companion.model,
+          usage.inputTokens ?? 0,
+          usage.outputTokens ?? 0,
+          usage.cacheWriteTokens ?? 0,
+          usage.cacheReadTokens ?? 0,
+        );
+      const finalizeReply = async (handoffCompanionIds: string[]) => {
+        await env.DB
+          .prepare(
+            `UPDATE messages
+             SET content_json = ?, audience_json = ?, status = 'complete',
+                 input_tokens = ?, output_tokens = ?,
+                 cache_creation_input_tokens = ?, cache_read_input_tokens = ?,
+                 cost_usd = ?
+             WHERE id = ?`,
+          )
+          .bind(
+            blocks(assistantText),
+            JSON.stringify(handoffCompanionIds),
+            usage.inputTokens ?? null,
+            usage.outputTokens ?? null,
+            usage.cacheWriteTokens ?? null,
+            usage.cacheReadTokens ?? null,
+            costForUsage(),
+            assistantId,
+          )
+          .run();
+        await env.DB
+          .prepare("UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+          .bind(requestedConversation)
+          .run();
+      };
+      let lastPartialPersist = Date.now();
+
+      try {
+        send({
+          type: "accepted",
+          ...(userId ? { userMessageId: userId } : {}),
+          assistantMessageId: assistantId,
+        });
+        for await (const data of sseData(providerResponse)) {
+          const event = JSON.parse(data) as Record<string, unknown>;
+          toolTracker.consume(event);
+          citationTracker.consume(event);
+          const delta = providerDelta(companion.provider, event, usage);
+          if (delta) {
+            emitText(filterOpeningArtifact(delta));
+          }
+          if (assistantText && Date.now() - lastPartialPersist >= 2_000) {
+            lastPartialPersist = Date.now();
+            await env.DB
+              .prepare(
+                "UPDATE messages SET content_json = ? WHERE id = ? AND status = 'streaming'",
+              )
+              .bind(blocks(assistantText), assistantId)
+              .run();
+          }
+        }
+        emitText(filterOpeningArtifact("", true));
+        emitText(citationTracker.markdown(assistantText));
+        const handoffCompanionIds = toolTracker
+          .results()
+          .map((call) => call.companionId);
+        if (!assistantText.trim() && handoffCompanionIds.length) {
+          const names = handoffCompanionIds
+            .map((id) => groupMembers.find((member) => member.id === id)?.name)
+            .filter((name): name is string => Boolean(name));
+          emitText(names.map((name) => `@${name}`).join(" "));
+        }
+        if (!assistantText.trim()) {
+          throw new Error(
+            `${companion.provider === "openrouter" ? "OpenRouter" : companion.provider} returned an empty reply for ${companion.model}. Try the model again or choose another model.`,
+          );
+        }
+
+        await finalizeReply(handoffCompanionIds);
+        let memoryUpdate:
+          | { processed: boolean; saved: number; shared: number; private: number }
+          | null = explicitMemory
+            ? { processed: true, saved: explicitMemory.saved, shared: explicitMemory.shared, private: explicitMemory.private }
+            : null;
+        try {
+          const idleMilliseconds = conversation?.updated_at
+            ? Date.now() - new Date(`${conversation.updated_at.replace(" ", "T")}Z`).getTime()
+            : 0;
+          if (!continuation) {
+            const automatic = await extractConversationMemory(
+              env.DB,
+              companion,
+              requestedConversation,
+              conversation?.kind || "solo",
+              env,
+              suppliedKey,
+              idleMilliseconds >= 45 * 60 * 1000,
+            );
+            if (automatic.processed) {
+              memoryUpdate = {
+                processed: true,
+                saved: (memoryUpdate?.saved || 0) + automatic.saved,
+                shared: (memoryUpdate?.shared || 0) + automatic.shared,
+                private: (memoryUpdate?.private || 0) + automatic.private,
+              };
+            }
+          }
+          await flushMemorySync(
+            env.DB,
+            remoteMemoryConfig,
+            await notionMirrorConfig(request, env.DB),
+          );
+        } catch {
+          // Memory consolidation must never eat a completed chat reply.
+        }
+        send({
+          type: "done",
+          messageId: assistantId,
+          usage,
+          provider: companion.provider,
+          model: companion.model,
+          companionId: companion.id,
+          companionName: companion.name,
+          replyToMessageId: assistantReplyToMessageId || null,
+          turnId: requestedTurnId,
+          costUsd: costForUsage(),
+          memoryUpdate,
+          handoffCompanionIds,
+        });
+      } catch (error) {
+        try {
+          if (assistantText.trim()) {
+            // Keep the words that already arrived instead of discarding them.
+            await finalizeReply(toolTracker.results().map((call) => call.companionId));
+          } else {
+            await env.DB
+              .prepare("DELETE FROM messages WHERE id = ? AND status = 'streaming'")
+              .bind(assistantId)
+              .run();
+          }
+        } catch {
+          // Cleanup must not replace the original error report.
+        }
+        send({
+          type: "error",
+          message: error instanceof Error ? error.message : "The streamed reply failed.",
+        });
+      } finally {
+        closeChannel();
+      }
+    })();
+    context?.waitUntil(generation.catch(() => undefined));
+
     const stream = new ReadableStream({
       async start(controller) {
-        let assistantText = "";
-        const usage: Usage = {};
-        const toolTracker = providerToolTracker(
-          companion.provider,
-          new Set(groupMembers.map((member) => member.id).filter((id) => id !== companion.id)),
-        );
-        const citationTracker = providerCitationTracker(companion.provider);
-        const filterOpeningArtifact = openingArtifactFilter(companion.name);
-        const send = (event: unknown) => {
-          controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
-        };
-        const emitText = (text: string) => {
-          if (!text) return;
-          assistantText += text;
-          send({ type: "delta", text });
-        };
-
+        let index = 0;
         try {
-          send({
-            type: "accepted",
-            ...(userId ? { userMessageId: userId } : {}),
-            assistantMessageId: assistantId,
-          });
-          for await (const data of sseData(providerResponse)) {
-            const event = JSON.parse(data) as Record<string, unknown>;
-            toolTracker.consume(event);
-            citationTracker.consume(event);
-            const delta = providerDelta(companion.provider, event, usage);
-            if (delta) {
-              emitText(filterOpeningArtifact(delta));
+          while (true) {
+            while (index < channelEvents.length) {
+              controller.enqueue(encoder.encode(`${JSON.stringify(channelEvents[index])}\n`));
+              index += 1;
             }
+            if (channelClosed) break;
+            await new Promise<void>((resolve) => {
+              wakeDrain = resolve;
+            });
           }
-          emitText(filterOpeningArtifact("", true));
-          emitText(citationTracker.markdown(assistantText));
-          const handoffCompanionIds = toolTracker
-            .results()
-            .map((call) => call.companionId);
-          if (!assistantText.trim() && handoffCompanionIds.length) {
-            const names = handoffCompanionIds
-              .map((id) => groupMembers.find((member) => member.id === id)?.name)
-              .filter((name): name is string => Boolean(name));
-            emitText(names.map((name) => `@${name}`).join(" "));
-          }
-          if (!assistantText.trim()) {
-            throw new Error(
-              `${companion.provider === "openrouter" ? "OpenRouter" : companion.provider} returned an empty reply for ${companion.model}. Try the model again or choose another model.`,
-            );
-          }
-
-          await env.DB
-            .prepare(
-              `INSERT INTO messages
-                (id, conversation_id, companion_id, speaker_id, speaker_name,
-                 audience_json, reply_to_message_id, turn_id, role,
-                 content_json, provider, model, status, input_tokens, output_tokens,
-                 cache_creation_input_tokens, cache_read_input_tokens, cost_usd)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'assistant', ?, ?, ?, 'complete',
-                       ?, ?, ?, ?, ?)`,
-            )
-            .bind(
-              assistantId,
-              requestedConversation,
-              companion.id,
-              companion.id,
-              companion.name,
-              JSON.stringify(handoffCompanionIds),
-              assistantReplyToMessageId || null,
-              requestedTurnId,
-              blocks(assistantText),
-              companion.provider,
-              companion.model,
-              usage.inputTokens ?? null,
-              usage.outputTokens ?? null,
-              usage.cacheWriteTokens ?? null,
-              usage.cacheReadTokens ?? null,
-              usage.costUsd ??
-                estimateCost(
-                  companion.provider,
-                  companion.model,
-                  usage.inputTokens ?? 0,
-                  usage.outputTokens ?? 0,
-                  usage.cacheWriteTokens ?? 0,
-                  usage.cacheReadTokens ?? 0,
-                ),
-            )
-            .run();
-          await env.DB
-            .prepare("UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?")
-            .bind(requestedConversation)
-            .run();
-          let memoryUpdate:
-            | { processed: boolean; saved: number; shared: number; private: number }
-            | null = explicitMemory
-              ? { processed: true, saved: explicitMemory.saved, shared: explicitMemory.shared, private: explicitMemory.private }
-              : null;
-          try {
-            const idleMilliseconds = conversation?.updated_at
-              ? Date.now() - new Date(`${conversation.updated_at.replace(" ", "T")}Z`).getTime()
-              : 0;
-            if (!continuation) {
-              const automatic = await extractConversationMemory(
-                env.DB,
-                companion,
-                requestedConversation,
-                conversation?.kind || "solo",
-                env,
-                suppliedKey,
-                idleMilliseconds >= 45 * 60 * 1000,
-              );
-              if (automatic.processed) {
-                memoryUpdate = {
-                  processed: true,
-                  saved: (memoryUpdate?.saved || 0) + automatic.saved,
-                  shared: (memoryUpdate?.shared || 0) + automatic.shared,
-                  private: (memoryUpdate?.private || 0) + automatic.private,
-                };
-              }
-            }
-            await flushMemorySync(
-              env.DB,
-              remoteMemoryConfig,
-              await notionMirrorConfig(request, env.DB),
-            );
-          } catch {
-            // Memory consolidation must never eat a completed chat reply.
-          }
-          send({
-            type: "done",
-            messageId: assistantId,
-            usage,
-            provider: companion.provider,
-            model: companion.model,
-            companionId: companion.id,
-            companionName: companion.name,
-            replyToMessageId: assistantReplyToMessageId || null,
-            turnId: requestedTurnId,
-            costUsd:
-              usage.costUsd ??
-              estimateCost(
-                companion.provider,
-                companion.model,
-                usage.inputTokens ?? 0,
-                usage.outputTokens ?? 0,
-                usage.cacheWriteTokens ?? 0,
-                usage.cacheReadTokens ?? 0,
-              ),
-            memoryUpdate,
-            handoffCompanionIds,
-          });
-        } catch (error) {
-          send({
-            type: "error",
-            message: error instanceof Error ? error.message : "The streamed reply failed.",
-          });
-        } finally {
+        } catch {
+          // The client went away; the generation loop above keeps running.
+        }
+        try {
           controller.close();
+        } catch {
+          // The stream was already cancelled with the connection.
         }
       },
     });

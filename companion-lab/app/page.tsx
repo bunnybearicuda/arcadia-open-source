@@ -1088,6 +1088,37 @@ export default function Home() {
     setMessages(data.messages || []);
   }
 
+  // A stored reply can still be generating server-side after this device
+  // dropped its stream (app closed or backgrounded mid-reply). While a
+  // stored message is marked streaming and no local stream is active, poll
+  // until the server finishes it; also refresh when the app returns to the
+  // foreground so a reply finished while away appears immediately.
+  const hasDetachedStreamingReply =
+    !sending &&
+    messages.some(
+      (message) =>
+        message.status === "streaming" && !message.id.startsWith("local-"),
+    );
+  useEffect(() => {
+    if (!hasDetachedStreamingReply || !activeConversationId) return;
+    const timer = window.setInterval(() => {
+      void loadMessages(activeConversationId).catch(() => undefined);
+    }, 2_500);
+    return () => window.clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasDetachedStreamingReply, activeConversationId]);
+  useEffect(() => {
+    const refreshOnReturn = () => {
+      if (document.visibilityState !== "visible") return;
+      if (sending || !activeConversationId) return;
+      void loadMessages(activeConversationId).catch(() => undefined);
+    };
+    document.addEventListener("visibilitychange", refreshOnReturn);
+    return () =>
+      document.removeEventListener("visibilitychange", refreshOnReturn);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sending, activeConversationId]);
+
   async function refreshConversations() {
     const response = await fetch("/api/conversations");
     if (!response.ok) throw new Error("Conversation history could not be loaded.");
@@ -3663,7 +3694,14 @@ export default function Home() {
       }
     } catch (error) {
       if (!messageCommitted) setDraft(body);
-      setNotice(error instanceof Error ? error.message : "The reply could not be completed.");
+      const connectionDropped = messageCommitted && error instanceof TypeError;
+      setNotice(
+        connectionDropped
+          ? "The connection dropped, but the reply keeps writing — it will appear here as it finishes."
+          : error instanceof Error
+            ? error.message
+            : "The reply could not be completed.",
+      );
       setMessages((current) =>
         current.filter(
           (message) =>

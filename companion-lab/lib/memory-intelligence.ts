@@ -475,6 +475,7 @@ export async function extractConversationMemory(
        WHERE m.conversation_id = ?
          AND m.rowid > ?
          AND m.superseded_at IS NULL
+         AND m.status != 'streaming'
        ORDER BY m.rowid ASC
        LIMIT 80`,
     )

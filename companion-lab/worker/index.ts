@@ -54,7 +54,7 @@ const worker = {
     }
 
     if (url.pathname === "/api/chat") {
-      return handleChatApi(request, env);
+      return handleChatApi(request, env, ctx);
     }
 
     if (url.pathname === "/api/attachments" || url.pathname.startsWith("/api/attachments/")) {
