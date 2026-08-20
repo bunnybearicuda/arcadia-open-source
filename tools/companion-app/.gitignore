@@ -1,0 +1,17 @@
+node_modules/
+.next/
+out/
+.env
+.env.local
+.env*.local
+*.tsbuildinfo
+next-env.d.ts
+
+# Your companions are yours. Only the example identity is tracked.
+identities/*.md
+!identities/_example.md
+!identities/README.md
+
+# Local memory exports / backups
+exports/
+.test-build/
