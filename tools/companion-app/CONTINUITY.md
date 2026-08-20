@@ -206,10 +206,18 @@ Two guards, because one isn't enough:
 | After 2 messages | Thread gets a real title |
 | Every 14 unsummarised messages | Thread state rewritten |
 | Every 24 unextracted messages | Rolling extraction mid-conversation |
-| 45 minutes of quiet | Full extraction + thread state (Vercel Cron, every 15 min) |
+| Returning to a thread after 45+ minutes quiet | Extraction of the stretch that ended |
+| The scheduled job | Extraction + thread state for anything still outstanding |
 
 The 45-minute wait is load-bearing. Extracting mid-conversation means
 remembering things that get contradicted ten messages later.
+
+The "returning after a gap" trigger exists because Vercel's free plan only runs
+scheduled jobs **once a day**. Without it, a conversation that simply ended
+would wait until tomorrow to be remembered. With it, the scheduled job is a
+backstop rather than the main path, and the free plan behaves nearly as well as
+a paid one. On Pro you can drop `vercel.json` to `*/15 * * * *` and close the
+gap entirely.
 
 All of it runs after the response has already streamed (`after()` in the chat
 route), so none of it makes her wait.

@@ -1,13 +1,11 @@
 import { db } from "@/lib/supabase";
 import { env } from "@/lib/env";
-import { extractMemories, updateThreadSummary } from "@/lib/memory/consolidate";
+import { IDLE_MINUTES, extractMemories, updateThreadSummary } from "@/lib/memory/consolidate";
 import type { Companion } from "@/lib/memory/types";
 
 export const runtime = "nodejs";
-export const maxDuration = 300;
+export const maxDuration = 60;
 
-/** Threads quiet for this long get consolidated — the "conversation ended" signal. */
-const QUIET_MINUTES = 45;
 const HUMAN = process.env.HUMAN_NAME || "her";
 
 /**
@@ -23,7 +21,7 @@ export async function GET(req: Request) {
     return new Response("Unauthorized", { status: 401 });
   }
 
-  const cutoff = new Date(Date.now() - QUIET_MINUTES * 60_000).toISOString();
+  const cutoff = new Date(Date.now() - IDLE_MINUTES * 60_000).toISOString();
 
   const { data: threads, error } = await db()
     .from("threads")

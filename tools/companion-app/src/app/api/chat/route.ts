@@ -7,11 +7,14 @@ import { db } from "@/lib/supabase";
 import { resolveIdentity } from "@/lib/identities";
 import { buildContext } from "@/lib/memory/context";
 import { MEMORY_TOOLS, runMemoryTool } from "@/lib/memory/tools";
-import { maybeConsolidate } from "@/lib/memory/consolidate";
+import { IDLE_MINUTES, maybeConsolidate } from "@/lib/memory/consolidate";
 import type { Companion, StoredMessage } from "@/lib/memory/types";
 
 export const runtime = "nodejs";
-export const maxDuration = 300;
+// Vercel's free plan caps function duration, and a value above the cap fails the
+// deploy outright. 60 is safe everywhere. On Pro (or with Fluid compute) raise
+// this to 300 so very long replies can't be cut off mid-sentence.
+export const maxDuration = 60;
 
 const HUMAN = process.env.HUMAN_NAME || "her";
 const MAX_TOOL_ROUNDS = 6;
@@ -61,6 +64,12 @@ export async function POST(req: Request) {
 
   const companion = companionRow as Companion;
   const model = body.model || companion.model;
+
+  // Read this BEFORE inserting her message, while last_message_at still points
+  // at the previous turn.
+  const resumedAfterGap = threadRow.last_message_at
+    ? Date.now() - new Date(threadRow.last_message_at).getTime() > IDLE_MINUTES * 60_000
+    : false;
   const spec = modelSpec(model);
 
   // Persist her message before we call anything, so a failed API call never
@@ -247,6 +256,7 @@ export async function POST(req: Request) {
         threadId: body.threadId,
         isGroup: threadRow.is_group ?? false,
         humanName: HUMAN,
+        resumedAfterGap,
       });
     } catch (e) {
       console.error("consolidation failed", e);

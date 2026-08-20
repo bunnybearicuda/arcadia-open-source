@@ -20,6 +20,8 @@ const WORKER_MODEL = "claude-haiku-4-5";
 const SUMMARY_EVERY = 14;
 /** Roll memory extraction mid-conversation once this many are unprocessed. */
 const EXTRACT_EVERY = 24;
+/** A thread quiet this long counts as a conversation that ended. */
+export const IDLE_MINUTES = 45;
 
 let promptCache: Map<string, string> | null = null;
 
@@ -215,6 +217,16 @@ export async function maybeConsolidate(opts: {
   threadId: string;
   isGroup: boolean;
   humanName: string;
+  /**
+   * True when this thread had been quiet longer than the idle window before the
+   * message that triggered this run — i.e. she's coming back to it after a gap,
+   * so whatever happened last time is over and safe to remember now.
+   *
+   * This matters most on Vercel's free plan, where the scheduled job only runs
+   * once a day. Without it, a conversation that simply ended would wait until
+   * tomorrow to be remembered.
+   */
+  resumedAfterGap?: boolean;
 }): Promise<void> {
   const { data: thread } = await db()
     .from("threads")
@@ -248,7 +260,9 @@ export async function maybeConsolidate(opts: {
   if (unsummarized >= SUMMARY_EVERY) {
     jobs.push(updateThreadSummary(opts));
   }
-  if (unextracted >= EXTRACT_EVERY) {
+  // Either the conversation has run long enough to be worth a rolling pass, or
+  // it ended a while ago and she's only now come back to it.
+  if (unextracted >= EXTRACT_EVERY || (opts.resumedAfterGap && unextracted >= 2)) {
     jobs.push(extractMemories(opts));
   }
 

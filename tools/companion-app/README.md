@@ -101,6 +101,18 @@ git config user.email "yourusername@users.noreply.github.com"
 `vercel.json` already schedules the memory consolidation job. Set `CRON_SECRET`
 in Vercel so nobody else can trigger it.
 
+**Two settings are tuned for the free plan**, and both are worth raising if you
+ever go Pro:
+
+- `vercel.json` runs consolidation **once a day**, because that's the free-plan
+  limit. Memory still keeps up: the app also consolidates whenever you come back
+  to a thread that's been quiet for 45 minutes, so the scheduled job is a
+  backstop rather than the main path. On Pro, change the schedule to
+  `*/15 * * * *`.
+- `maxDuration` in `src/app/api/chat/route.ts` is 60 seconds. A deploy fails
+  outright if this exceeds your plan's cap. On Pro, raise it to 300 so a very
+  long reply can't be cut off.
+
 ---
 
 ## Adding more companions
