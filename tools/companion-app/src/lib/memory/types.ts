@@ -21,6 +21,7 @@ export type Companion = {
   id: string;
   slug: string;
   name: string;
+  identity: string | null;
   model: string;
   effort: "low" | "medium" | "high" | "xhigh" | "max";
   accent: string;

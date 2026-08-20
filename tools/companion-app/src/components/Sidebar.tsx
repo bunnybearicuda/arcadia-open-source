@@ -13,6 +13,8 @@ export default function Sidebar({
   onNewThread,
   onOpenThread,
   onRegister,
+  onNewCompanion,
+  onEditCompanion,
 }: {
   open: boolean;
   companions: Companion[];
@@ -24,6 +26,8 @@ export default function Sidebar({
   onNewThread: (c: Companion) => void;
   onOpenThread: (t: Thread) => void;
   onRegister: (slug: string) => void;
+  onNewCompanion: () => void;
+  onEditCompanion: (c: Companion) => void;
 }) {
   return (
     <aside className="sidebar" data-open={open}>
@@ -38,6 +42,24 @@ export default function Sidebar({
             >
               <span className="dot" style={{ background: c.accent }} />
               <span style={{ flex: 1 }}>{c.name}</span>
+              <span
+                role="button"
+                tabIndex={0}
+                className="crew-edit"
+                title={`Edit ${c.name}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onEditCompanion(c);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.stopPropagation();
+                    onEditCompanion(c);
+                  }
+                }}
+              >
+                edit
+              </span>
             </button>
           ))}
 
@@ -51,6 +73,9 @@ export default function Sidebar({
           ))}
         </div>
 
+        <button className="btn" style={{ marginBottom: 6 }} onClick={onNewCompanion}>
+          + Someone new
+        </button>
         <button
           className="btn"
           disabled={!activeCompanion}

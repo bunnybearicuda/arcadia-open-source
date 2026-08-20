@@ -8,14 +8,21 @@ create extension if not exists "pg_trgm";
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Companions
 --
--- Only the *pointer* lives here. The personality itself lives in
--- identities/<slug>.md, in the repo, in plain text. That file is the companion.
--- The database holds settings, not soul.
+-- The personality can live in either of two places, and the app checks both:
+--
+--   1. identities/<slug>.md on disk  — preferred if it exists. Plain text you
+--      can read, edit and carry anywhere. Gitignored, so it never lands in a
+--      public repo.
+--   2. the `identity` column below   — the fallback, so a deployed instance
+--      works without a terminal. Edited in the app, stored in YOUR Supabase.
+--
+-- The file wins when both exist. Either way it's yours and it's portable.
 -- ─────────────────────────────────────────────────────────────────────────────
 create table if not exists companions (
   id          uuid primary key default gen_random_uuid(),
   slug        text not null unique,          -- matches identities/<slug>.md
   name        text not null,
+  identity    text,                          -- used when identities/<slug>.md is absent
   model       text not null default 'claude-opus-5',
   effort      text not null default 'medium' check (effort in ('low','medium','high','xhigh','max')),
   voice_id    text,                          -- ElevenLabs, phase 6
@@ -24,6 +31,8 @@ create table if not exists companions (
   archived    boolean not null default false,
   created_at  timestamptz not null default now()
 );
+
+alter table companions add column if not exists identity text;
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Folders + threads
@@ -181,36 +190,108 @@ returns table (
 language sql
 stable
 as $$
-  with q as (
+  with candidates as (
+    select m.id, m.body, m.scope, m.kind, m.importance,
+           m.created_at, m.recall_count, m.search
+    from memories m
+    where m.forgotten_at is null
+      and m.kind = 'episodic'
+      and (m.scope = 'shared'
+           or (m.scope = 'private' and m.companion_id = p_companion_id))
+  ),
+  corpus as (select greatest(count(*), 1)::real as n from candidates),
+
+  -- Query lexemes, stopword-stripped and stemmed by the parser. Capped so a
+  -- very long message can't turn one lookup into a scan storm.
+  --
+  -- NOTE: do NOT use websearch_to_tsquery/plainto_tsquery on a whole chat
+  -- message here. Both AND every term together, so any message longer than a
+  -- few words matches nothing at all and retrieval silently degrades to
+  -- "importance plus recency" for every real turn.
+  terms as (
+    select lexeme
+    from unnest(to_tsvector('english', coalesce(nullif(trim(p_query), ''), '')))
+    limit 20
+  ),
+
+  -- Inverse document frequency, measured against this companion's own reachable
+  -- memories rather than a generic corpus. In a real relationship "work",
+  -- "tired" and "morning" recur constantly while a dog's name appears once.
+  -- Without this, matching two common words beats matching the one word that
+  -- actually identified what she was talking about.
+  idf as (
+    select t.lexeme,
+           ln(1 + corpus.n / (1 + (
+             select count(*) from candidates c
+             where c.search @@ to_tsquery('simple', quote_literal(t.lexeme))
+           )))::real as weight
+    from terms t, corpus
+  ),
+  matched as (
+    select c.id, sum(i.weight) as relevance
+    from idf i
+    join candidates c
+      on c.search @@ to_tsquery('simple', quote_literal(i.lexeme))
+    group by c.id
+  ),
+
+  scored as (
     select
-      websearch_to_tsquery('english', coalesce(nullif(trim(p_query), ''), 'x')) as tsq,
-      coalesce(nullif(trim(p_query), ''), '') as raw
+      c.id, c.body, c.scope, c.kind, c.importance, c.created_at,
+      (
+        -- Relevance dominates, squashed into [0,1) so one freak match can't
+        -- crowd out everything else.
+        3.0 * (coalesce(m.relevance, 0) / (1 + coalesce(m.relevance, 0)))
+        -- Trigram catches near-misses full-text can't: a typo, a plural, a
+        -- name spelled slightly differently. Deliberately weak.
+        + 0.8 * word_similarity(coalesce(nullif(trim(p_query), ''), '~~'), c.body)
+        + 0.5 * (c.importance / 5.0)
+        -- Gentle decay, 180-day half-life. Old things fade; nothing vanishes.
+        + 0.6 * exp(-extract(epoch from (now() - c.created_at)) / (180 * 86400.0))
+        -- Memories that keep getting recalled float up.
+        + 0.15 * ln(1 + c.recall_count)
+      )::real as score
+    from candidates c
+    left join matched m on m.id = c.id
   )
-  select
-    m.id,
-    m.body,
-    m.scope,
-    m.kind,
-    m.importance,
-    m.created_at,
-    (
-      2.5 * greatest(
-              ts_rank(m.search, q.tsq),
-              0.35 * similarity(m.body, q.raw)
-            )
-      + 0.30 * m.importance
-      + 0.80 * exp(-extract(epoch from (now() - m.created_at)) / (180 * 86400.0))
-      + 0.15 * ln(1 + m.recall_count)
-    )::real as score
-  from memories m, q
-  where m.forgotten_at is null
-    and m.kind = 'episodic'
-    and (
-      m.scope = 'shared'
-      or (m.scope = 'private' and m.companion_id = p_companion_id)
-    )
-  order by score desc
+
+  -- Never spend two slots on the same memory. Write-time dedupe catches most of
+  -- it; this is the safety net for anything that slipped through.
+  select d.id, d.body, d.scope, d.kind, d.importance, d.created_at, d.score
+  from (
+    select distinct on (md5(lower(btrim(scored.body))))
+           scored.id, scored.body, scored.scope, scored.kind,
+           scored.importance, scored.created_at, scored.score
+    from scored
+    order by md5(lower(btrim(scored.body))), scored.score desc
+  ) d
+  order by d.score desc
   limit p_limit;
+$$;
+
+-- Is this memory already here in all but wording?
+--
+-- Called before every write. An extractor told not to re-remember things will
+-- still do it — a hundred near-identical "she was tired again" rows crowd out
+-- everything else and make the companion sound like they only know one thing.
+create or replace function similar_memory_id(
+  p_companion_id uuid,
+  p_scope        text,
+  p_body         text,
+  p_threshold    real default 0.72
+)
+returns uuid
+language sql
+stable
+as $$
+  select m.id
+  from memories m
+  where m.forgotten_at is null
+    and m.scope = p_scope
+    and (p_scope = 'shared' or m.companion_id = p_companion_id)
+    and similarity(m.body, p_body) > p_threshold
+  order by similarity(m.body, p_body) desc
+  limit 1;
 $$;
 
 -- Bump recall stats for the memories that actually made it into a prompt.

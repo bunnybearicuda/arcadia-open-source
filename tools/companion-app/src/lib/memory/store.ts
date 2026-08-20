@@ -50,8 +50,28 @@ export async function writeMemory(input: {
   sourceThreadId?: string | null;
 }): Promise<Memory> {
   const scope = input.scope ?? "private";
+  const body = input.body.trim();
+
+  // Don't store the same memory twice in different words. An extractor told not
+  // to re-remember things will still do it, and a hundred near-identical "she
+  // was tired again" rows crowd out everything else — the companion ends up
+  // sounding like they only know one thing about her.
+  const { data: dupeId } = await db().rpc("similar_memory_id", {
+    p_companion_id: input.companionId,
+    p_scope: scope,
+    p_body: body,
+  });
+  if (dupeId) {
+    const { data: existing } = await db()
+      .from("memories")
+      .select("*")
+      .eq("id", dupeId as string)
+      .single();
+    if (existing) return existing as Memory;
+  }
+
   const row = {
-    body: input.body.trim(),
+    body,
     scope,
     kind: input.kind ?? "episodic",
     // A shared memory belongs to the crew, not to one companion.

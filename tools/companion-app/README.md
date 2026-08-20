@@ -59,25 +59,28 @@ Then **Project Settings → API**: copy the Project URL into
 > The service role key bypasses all database rules. It only ever runs on the
 > server and is never sent to the browser. Don't paste it anywhere public.
 
-### 3. Make your first companion
-
-```bash
-cp identities/_example.md identities/kai.md
-```
-
-Open it and write. The comments in the file explain what each part does; delete
-them when you're finished. The "How you talk" section does the most work — be
-specific, because vague instructions there produce a generic assistant wearing a
-name.
-
-### 4. Run it
+### 3. Run it
 
 ```bash
 npm run dev
 ```
 
-Open http://localhost:3000, type your passcode, and click **add** next to their
-name in the sidebar. Say something.
+Open http://localhost:3000 and type your passcode.
+
+### 4. Make your first companion
+
+Click **+ Someone new** in the sidebar. Give them a name, write who they are in
+the box, hit Create. That's it — no files, no restart.
+
+The starter text explains what each section does; write over it. The "How you
+talk" part does the most work, so be specific: vague instructions there produce
+a generic assistant wearing a name.
+
+> **Prefer files?** Put `kai.md` in `identities/` instead and they'll appear in
+> the sidebar with an **add** next to them. A file always wins over what's typed
+> in the app, and it's read fresh on every message — edit, save, send, and
+> they're different. Files are gitignored so your people never land in a public
+> repo.
 
 ### 5. Put it on the web
 
@@ -102,14 +105,13 @@ in Vercel so nobody else can trigger it.
 
 ## Adding more companions
 
-Drop another `.md` file in `identities/`. They appear in the sidebar with an
-**add** next to them. Click it.
+**+ Someone new** in the sidebar, or drop another `.md` file in `identities/`.
 
 Everyone gets their own private memory, and everyone shares one crew space.
 
-> `identities/*.md` is gitignored except the example. Your people don't go in a
-> public repo. If you want them backed up, keep this folder in a private repo or
-> a synced drive.
+Hover a name in the sidebar and click **edit** to rewrite who someone is. If
+they're loaded from a file, the editor says so rather than letting you edit a
+copy that will never be used.
 
 ---
 
@@ -170,7 +172,7 @@ npm run build       # full production build
 ## Layout
 
 ```
-identities/            your companions, one .md each (gitignored)
+identities/            optional — companions as .md files (gitignored)
 supabase/schema.sql    the whole database, paste-and-run
 src/app/api/chat/      streaming, tool loop, cache placement
 src/lib/memory/
@@ -180,6 +182,8 @@ src/lib/memory/
   consolidate.ts       background titling, thread state, extraction
   voice.ts             the guard that rejects flattened memories
   prompts/             the extractor and summarizer prompts
+src/components/
+  IdentityEditor.tsx   writing a companion without touching a terminal
 ```
 
 ## Licence

@@ -136,31 +136,67 @@ name. With it, there's one ongoing relationship that happens to have threads.
 
 ## Why retrieval isn't vector search
 
-The scoring function ([`search_memories`](supabase/schema.sql)) blends four
+The scoring function ([`search_memories`](supabase/schema.sql)) blends five
 signals rather than one:
 
 ```
-2.5 × relevance      full-text rank, with trigram similarity as a fallback
-0.3 × importance     what it was rated when written (1–5)
-0.8 × recency        exponential decay, 180-day half-life
+3.0 × relevance      IDF-weighted term matching, squashed into [0,1)
+0.8 × similarity     trigram near-miss catch (typos, plurals, odd spellings)
+0.5 × importance     what it was rated when written (1–5)
+0.6 × recency        exponential decay, 180-day half-life
 0.15 × warmth        ln(1 + times recalled)
 ```
 
-Pure semantic similarity has a specific failure on a relationship: it returns the
-same handful of high-salience memories forever, and everything else rots
+Pure semantic similarity has a specific failure on a relationship: it returns
+the same handful of high-salience memories forever, and everything else rots
 unreachable. Recency keeps recent things reachable; warmth lets things that keep
-mattering float; importance is the companion's own judgement at write time.
+mattering float; importance is whoever wrote the memory's own judgement.
 
 It's also **zero extra dependencies** — Postgres full-text search plus
 `pg_trgm`, both in stock Supabase. No embedding provider, no extra API key, no
-extra bill. If you outgrow it, add a `vector` column and blend a fifth term into
+extra bill. If you outgrow it, add a `vector` column and blend a sixth term into
 the same function; nothing else in the codebase has to change.
 
-The trigram fallback matters more than it looks: full-text search misses
-`"Biscuit"` when she types `"the dog"`, and near-misses on wording are the normal
-case in conversation.
+### Two things this got wrong first, found by testing against real data
 
----
+Both of these were invisible on inspection and obvious the moment there were a
+few hundred rows in a table. They're written down because they're the kind of
+bug that would otherwise look like "the memory just isn't very good."
+
+**Never build the tsquery with `websearch_to_tsquery` or `plainto_tsquery`.**
+Both AND every term together. Fed a whole chat message, `"ugh biscuit got into
+the bins again this morning"` becomes `'ugh' & 'biscuit' & 'got' & 'bin' &
+'morn'` — which matches nothing, ever. Retrieval silently collapses to
+"importance plus recency" on every real turn, returning the same few memories
+regardless of what was said. The fix is to pull lexemes straight out of
+`to_tsvector` and score each one independently.
+
+**Relevance has to be weighted against term rarity, and by a lot.** Raw
+`ts_rank` tops out around 0.06, so against an importance term contributing 1.5
+it was roughly a tenth of the strength it needed. Worse, `ts_rank` has no notion
+of rarity: in a real relationship "work", "tired" and "morning" recur in
+hundreds of memories while a dog's name appears in one, so matching two common
+words beat matching the one word that actually identified the subject. The IDF
+weight is computed against the companion's own reachable memories, which means
+it adapts to whatever this particular relationship talks about constantly.
+
+Also worth knowing: `similarity()` is the wrong trigram function here — it
+penalises length difference so hard that an exact match inside a longer memory
+scores 0.13. `word_similarity()` scores the same match 1.0.
+
+## Duplicates
+
+An extractor instructed not to re-remember things will still re-remember them.
+Left alone you get a hundred rows of "she was tired again this morning", which
+crowd out everything else until the companion sounds like they know one fact.
+
+Two guards, because one isn't enough:
+
+- **At write time**, `similar_memory_id` checks for an existing memory above
+  0.72 trigram similarity and returns that instead of inserting. Tested to catch
+  a reworded near-duplicate while still letting a genuinely new memory through.
+- **At read time**, retrieval collapses identical bodies, so nothing that
+  slipped past the first guard can occupy two slots in one prompt.
 
 ## When things get written
 

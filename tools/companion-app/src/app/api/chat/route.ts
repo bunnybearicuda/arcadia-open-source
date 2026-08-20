@@ -4,7 +4,7 @@ import AnthropicSDK from "@anthropic-ai/sdk";
 import { isAuthed } from "@/lib/auth";
 import { anthropic, buildParams, isSystemRoleRejection, modelSpec, type ChatTurn } from "@/lib/anthropic";
 import { db } from "@/lib/supabase";
-import { loadIdentity } from "@/lib/identities";
+import { resolveIdentity } from "@/lib/identities";
 import { buildContext } from "@/lib/memory/context";
 import { MEMORY_TOOLS, runMemoryTool } from "@/lib/memory/tools";
 import { maybeConsolidate } from "@/lib/memory/consolidate";
@@ -71,7 +71,7 @@ export async function POST(req: Request) {
     content: body.content,
   });
 
-  const identity = await loadIdentity(companion.slug);
+  const identity = await resolveIdentity(companion.slug, companion.identity);
 
   const queryText = body.content
     .filter((b): b is Anthropic.TextBlockParam => b.type === "text")

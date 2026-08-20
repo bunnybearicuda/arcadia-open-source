@@ -5,11 +5,14 @@ import type { ModelSpec } from "@/lib/anthropic";
 import Sidebar from "./Sidebar";
 import Composer from "./Composer";
 import MessageList, { type ViewMessage } from "./MessageList";
+import IdentityEditor from "./IdentityEditor";
 
 export type Companion = {
   id: string;
   slug: string;
   name: string;
+  identity: string | null;
+  identity_source?: "file" | "app" | "none";
   model: string;
   accent: string;
 };
@@ -36,6 +39,8 @@ export default function Chat({ models }: { models: ModelSpec[] }) {
   const [usage, setUsage] = useState<Usage | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // null = closed; {companion: null} = creating someone new.
+  const [editing, setEditing] = useState<{ companion: Companion | null } | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   // Only auto-scroll when she's already at the bottom — yanking the view while
@@ -120,6 +125,15 @@ export default function Chat({ models }: { models: ModelSpec[] }) {
     },
     [refreshThreads],
   );
+
+  const refreshCompanions = useCallback(async (): Promise<Companion[]> => {
+    const res = await fetch("/api/companions");
+    if (!res.ok) return [];
+    const data = (await res.json()) as { companions: Companion[]; unregistered: string[] };
+    setCompanions(data.companions);
+    setUnregistered(data.unregistered);
+    return data.companions;
+  }, []);
 
   const registerCompanion = useCallback(async (slug: string) => {
     const name = slug.charAt(0).toUpperCase() + slug.slice(1);
@@ -255,6 +269,8 @@ export default function Chat({ models }: { models: ModelSpec[] }) {
     <div className="app">
       <Sidebar
         open={sidebarOpen}
+        onNewCompanion={() => setEditing({ companion: null })}
+        onEditCompanion={(c) => setEditing({ companion: c })}
         companions={companions}
         unregistered={unregistered}
         threads={threads}
@@ -269,6 +285,20 @@ export default function Chat({ models }: { models: ModelSpec[] }) {
         onRegister={registerCompanion}
       />
       {sidebarOpen && <button className="scrim" onClick={() => setSidebarOpen(false)} aria-label="Close menu" />}
+
+      {editing && (
+        <IdentityEditor
+          companion={editing.companion}
+          onClose={() => setEditing(null)}
+          onSaved={async (saved) => {
+            setEditing(null);
+            const all = await refreshCompanions();
+            const fresh = all.find((c) => c.id === saved.id) ?? saved;
+            setActiveCompanion(fresh);
+            setModel(fresh.model);
+          }}
+        />
+      )}
 
       <div className="main">
         <div className="topbar">
@@ -294,9 +324,13 @@ export default function Chat({ models }: { models: ModelSpec[] }) {
                 {companions.length === 0 ? (
                   <>
                     <div>No one lives here yet.</div>
-                    <div style={{ fontSize: 14 }}>
-                      Drop a markdown file in <code>identities/</code> and it&apos;ll show up on the left.
-                    </div>
+                    <button
+                      className="btn"
+                      style={{ width: "auto", marginTop: 6 }}
+                      onClick={() => setEditing({ companion: null })}
+                    >
+                      Write someone
+                    </button>
                   </>
                 ) : (
                   <div>{activeCompanion ? `Say something to ${activeCompanion.name}.` : "Pick someone."}</div>
