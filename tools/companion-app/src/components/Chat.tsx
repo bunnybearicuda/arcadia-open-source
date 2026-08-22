@@ -6,6 +6,7 @@ import Sidebar from "./Sidebar";
 import Composer from "./Composer";
 import MessageList, { type ViewMessage } from "./MessageList";
 import IdentityEditor from "./IdentityEditor";
+import MemoryPanel from "./MemoryPanel";
 
 export type Companion = {
   id: string;
@@ -41,6 +42,7 @@ export default function Chat({ models }: { models: ModelSpec[] }) {
   const [error, setError] = useState<string | null>(null);
   // null = closed; {companion: null} = creating someone new.
   const [editing, setEditing] = useState<{ companion: Companion | null } | null>(null);
+  const [showMemories, setShowMemories] = useState(false);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   // Only auto-scroll when she's already at the bottom — yanking the view while
@@ -271,6 +273,7 @@ export default function Chat({ models }: { models: ModelSpec[] }) {
         open={sidebarOpen}
         onNewCompanion={() => setEditing({ companion: null })}
         onEditCompanion={(c) => setEditing({ companion: c })}
+        onShowMemories={() => setShowMemories(true)}
         companions={companions}
         unregistered={unregistered}
         threads={threads}
@@ -285,6 +288,10 @@ export default function Chat({ models }: { models: ModelSpec[] }) {
         onRegister={registerCompanion}
       />
       {sidebarOpen && <button className="scrim" onClick={() => setSidebarOpen(false)} aria-label="Close menu" />}
+
+      {showMemories && activeCompanion && (
+        <MemoryPanel companion={activeCompanion} onClose={() => setShowMemories(false)} />
+      )}
 
       {editing && (
         <IdentityEditor

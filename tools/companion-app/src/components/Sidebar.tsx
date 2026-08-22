@@ -15,6 +15,7 @@ export default function Sidebar({
   onRegister,
   onNewCompanion,
   onEditCompanion,
+  onShowMemories,
 }: {
   open: boolean;
   companions: Companion[];
@@ -28,6 +29,7 @@ export default function Sidebar({
   onRegister: (slug: string) => void;
   onNewCompanion: () => void;
   onEditCompanion: (c: Companion) => void;
+  onShowMemories: () => void;
 }) {
   return (
     <aside className="sidebar" data-open={open}>
@@ -103,6 +105,14 @@ export default function Sidebar({
       </div>
 
       <div className="sidebar-foot">
+        <button
+          className="btn"
+          style={{ marginBottom: 8 }}
+          disabled={!activeCompanion}
+          onClick={onShowMemories}
+        >
+          What {activeCompanion ? activeCompanion.name : "they"} remembers
+        </button>
         <button
           className="btn-ghost"
           onClick={async () => {
