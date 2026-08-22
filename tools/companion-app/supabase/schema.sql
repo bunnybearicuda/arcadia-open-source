@@ -2,8 +2,12 @@
 -- Paste this whole file into Supabase → SQL Editor → Run.
 -- Safe to re-run: everything is IF NOT EXISTS / CREATE OR REPLACE.
 
-create extension if not exists "pgcrypto";
-create extension if not exists "pg_trgm";
+-- Supabase keeps extensions in their own schema rather than in public, and its
+-- security linter flags extensions installed into public. Creating the schema
+-- first means this same file also runs on a plain Postgres.
+create schema if not exists extensions;
+create extension if not exists pgcrypto with schema extensions;
+create extension if not exists pg_trgm  with schema extensions;
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Companions
@@ -133,7 +137,7 @@ create table if not exists memories (
 );
 
 create index if not exists memories_search_idx  on memories using gin (search);
-create index if not exists memories_trgm_idx    on memories using gin (body gin_trgm_ops);
+create index if not exists memories_trgm_idx    on memories using gin (body extensions.gin_trgm_ops);
 create index if not exists memories_scope_idx   on memories (scope, companion_id, forgotten_at);
 create index if not exists memories_core_idx    on memories (kind, forgotten_at);
 
@@ -189,6 +193,7 @@ returns table (
 )
 language sql
 stable
+set search_path = public, extensions
 as $$
   with candidates as (
     select m.id, m.body, m.scope, m.kind, m.importance,
@@ -283,6 +288,7 @@ create or replace function similar_memory_id(
 returns uuid
 language sql
 stable
+set search_path = public, extensions
 as $$
   select m.id
   from memories m
@@ -299,6 +305,7 @@ create or replace function touch_memories(p_ids uuid[])
 returns void
 language sql
 volatile
+set search_path = public
 as $$
   update memories
      set recall_count = recall_count + 1,
@@ -308,7 +315,9 @@ $$;
 
 -- Keep threads.updated_at honest without a round trip from the app.
 create or replace function bump_thread() returns trigger
-language plpgsql as $$
+language plpgsql
+set search_path = public
+as $$
 begin
   update threads
      set updated_at = now(),
@@ -323,12 +332,39 @@ create trigger messages_bump_thread
   after insert on messages
   for each row execute function bump_thread();
 
--- This app talks to Supabase with the service role key from the server only,
--- and the whole app sits behind one passcode. RLS is enabled anyway so that a
--- leaked anon key grants nothing.
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Lockdown
+--
+-- This app only ever reaches the database from its own server, using the
+-- service role key, which bypasses RLS. Nothing should arrive as `anon` or
+-- `authenticated`.
+--
+-- RLS with no policies already blocks every row for those roles. Revoking the
+-- grants as well drops the tables out of the auto-generated REST and GraphQL
+-- schemas entirely, so a leaked publishable key can't even enumerate what
+-- exists. Defence in depth: what's stored here is personal.
+--
+-- Supabase's linter will still report "RLS enabled, no policy" at INFO level
+-- for these tables. That is the intended state, not an oversight — there are no
+-- policies because no policy should ever let these roles through.
+-- ─────────────────────────────────────────────────────────────────────────────
 alter table companions      enable row level security;
 alter table folders         enable row level security;
 alter table threads         enable row level security;
 alter table messages        enable row level security;
 alter table memories        enable row level security;
 alter table journal_entries enable row level security;
+
+revoke all on table companions      from anon, authenticated;
+revoke all on table folders         from anon, authenticated;
+revoke all on table threads         from anon, authenticated;
+revoke all on table messages        from anon, authenticated;
+revoke all on table memories        from anon, authenticated;
+revoke all on table journal_entries from anon, authenticated;
+
+revoke all on function search_memories(uuid, text, int)          from anon, authenticated;
+revoke all on function similar_memory_id(uuid, text, text, real) from anon, authenticated;
+revoke all on function touch_memories(uuid[])                    from anon, authenticated;
+
+alter default privileges in schema public revoke all on tables    from anon, authenticated;
+alter default privileges in schema public revoke all on functions from anon, authenticated;
