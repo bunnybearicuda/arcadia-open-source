@@ -59,6 +59,13 @@ Then **Project Settings → API**: copy the Project URL into
 > The service role key bypasses all database rules. It only ever runs on the
 > server and is never sent to the browser. Don't paste it anywhere public.
 
+The schema locks these tables down to the service role only: RLS is on with no
+policies, and the `anon` and `authenticated` grants are revoked so the tables
+don't appear in the auto-generated REST or GraphQL schemas at all. Supabase's
+linter will report *"RLS enabled, no policy"* at INFO level for each table —
+that's the intended state, not an oversight. No policy should ever let those
+roles through.
+
 ### 3. Run it
 
 ```bash
