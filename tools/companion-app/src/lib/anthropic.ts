@@ -71,6 +71,20 @@ export const MODELS: ModelSpec[] = [
     effort: true,
   },
   {
+    id: "claude-opus-4-5",
+    label: "Opus 4.5",
+    blurb: "Older Opus. The one many people preferred for warmth.",
+    systemRole: false,
+    effort: true,
+  },
+  {
+    id: "claude-sonnet-4-5",
+    label: "Sonnet 4.5",
+    blurb: "Older Sonnet. Some find its voice more distinct than the newer runs.",
+    systemRole: false,
+    effort: false,
+  },
+  {
     id: "claude-haiku-4-5",
     label: "Haiku 4.5",
     blurb: "Cheapest. Fine for quick back-and-forth, thin for depth.",
