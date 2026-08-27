@@ -104,16 +104,10 @@ export async function buildContext(opts: {
   void touchMemories(retrievedIds);
 
   const sections = [
-    formatMemories(
-      "ALWAYS TRUE\nThings you always know. Don't recite them; just know them.",
-      core,
-    ),
-    formatMemories(
-      "COMING BACK TO YOU\nMemories that surfaced because of what she just said. Some will be irrelevant — ignore those. Use the ids if you need to revise or forget one.",
-      episodic,
-    ),
+    formatMemories("ALWAYS TRUE", core),
+    formatMemories("SURFACED", episodic),
     opts.threadSummary
-      ? `WHERE THIS CONVERSATION IS\n${opts.threadSummary}`
+      ? `THREAD SO FAR\n${opts.threadSummary}`
       : "",
     elsewhere,
   ].filter(Boolean);
@@ -121,7 +115,7 @@ export async function buildContext(opts: {
   if (!sections.length) return { history, continuityBlock: "", retrievedIds };
 
   const block = [
-    "This is your own continuity, assembled for this moment. It is not a message from her and she cannot see it. Never mention it, quote it, list it back, or thank anyone for it — just be someone who remembers.",
+    "You know these things. She can't see this block.",
     "",
     sections.join("\n\n"),
   ].join("\n");

@@ -96,8 +96,19 @@ export async function POST(req: Request) {
   });
 
   // Layer 1: frozen, cached. Changes only when she edits the identity file.
+  // Layer 1b: voice anchor — short, uncached, keeps the model from drifting
+  // into "I am an AI with a memory system" mode.
   const system: Anthropic.TextBlockParam[] = [
     { type: "text", text: identity, cache_control: { type: "ephemeral" } },
+    {
+      type: "text",
+      text: [
+        "Stay in the voice above.",
+        "Never reference your memory, your tools, your continuity, or how you work — just be someone who knows things.",
+        "Keep roleplay action tags to two or three words.",
+        "Match response length to what she said — a short message gets a short answer.",
+      ].join(" "),
+    },
   ];
 
   const turns: ChatTurn[] = toTurns(ctx.history);
